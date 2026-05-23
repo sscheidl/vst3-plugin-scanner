@@ -1,0 +1,881 @@
+#include "ReportWriter.h"
+#include "ScannerEngine.h"
+#include "StringUtil.h"
+#include "DuplicateDetector.h"
+
+#include <Windows.h>
+#include <windowsx.h>
+#include <CommCtrl.h>
+#include <ShlObj.h>
+#include <commdlg.h>
+#include <shellapi.h>
+
+#include <atomic>
+#include <algorithm>
+#include <filesystem>
+#include <memory>
+#include <cwchar>
+#include <string>
+#include <thread>
+#include <vector>
+
+#pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Comdlg32.lib")
+#pragma comment(lib, "Ole32.lib")
+#pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Version.lib")
+
+namespace {
+
+constexpr int IDC_VST2_PATH = 1001;
+constexpr int IDC_VST3_PATH = 1002;
+constexpr int IDC_CUSTOM_PATH = 1003;
+constexpr int IDC_OUTPUT_FILE = 1004;
+constexpr int IDC_FORMAT = 1005;
+constexpr int IDC_START = 1006;
+constexpr int IDC_STOP = 1007;
+constexpr int IDC_PROGRESS = 1008;
+constexpr int IDC_STATUS = 1009;
+constexpr int IDC_LOG = 1010;
+constexpr int IDC_BROWSE_VST2 = 1011;
+constexpr int IDC_BROWSE_VST3 = 1012;
+constexpr int IDC_BROWSE_CUSTOM = 1013;
+constexpr int IDC_BROWSE_OUTPUT = 1014;
+constexpr int IDC_CLAP_PATH = 1015;
+constexpr int IDC_AAX_PATH = 1016;
+constexpr int IDC_BROWSE_CLAP = 1017;
+constexpr int IDC_BROWSE_AAX = 1018;
+constexpr int IDC_RESULTS = 1019;
+constexpr int IDC_EXPORT = 1020;
+constexpr int IDC_SUMMARY = 1021;
+constexpr int IDC_CLEAN_VST2_DUP = 1022;
+constexpr int IDC_CLEAN_CLAP = 1023;
+constexpr int IDC_CLEAN_AAX = 1024;
+
+constexpr UINT IDM_OPEN_IN_EXPLORER = 40001;
+constexpr UINT IDM_DELETE_SELECTED = 40002;
+
+constexpr wchar_t APP_VERSION[] = L"1.0.0.0";
+
+constexpr UINT WM_SCAN_PROGRESS = WM_APP + 1;
+constexpr UINT WM_SCAN_LOG = WM_APP + 2;
+constexpr UINT WM_SCAN_DONE = WM_APP + 3;
+
+struct ProgressMessage {
+    std::size_t current = 0;
+    std::size_t total = 0;
+    std::wstring message;
+};
+
+struct DoneMessage {
+    bool stopped = false;
+    ScanSummary summary;
+    std::vector<PluginRecord> records;
+};
+
+struct AppState {
+    HWND window = nullptr;
+    HWND progress = nullptr;
+    HWND status = nullptr;
+    HWND log = nullptr;
+    HWND results = nullptr;
+    HWND startButton = nullptr;
+    HWND stopButton = nullptr;
+    HWND exportButton = nullptr;
+    HWND cleanVst2DuplicatesButton = nullptr;
+    HWND cleanClapButton = nullptr;
+    HWND cleanAaxButton = nullptr;
+    HWND summaryLabel = nullptr;
+    HWND formatCombo = nullptr;
+    std::thread worker;
+    std::atomic_bool stopRequested = false;
+    std::vector<PluginRecord> records;
+    ScanSummary summary;
+    int sortColumn = -1;
+    bool sortAscending = true;
+    bool running = false;
+};
+
+std::wstring GetWindowTextString(HWND control) {
+    const int length = GetWindowTextLengthW(control);
+    std::wstring text(static_cast<std::size_t>(length + 1), L'\0');
+    if (length > 0) {
+        GetWindowTextW(control, text.data(), length + 1);
+    }
+    text.resize(static_cast<std::size_t>(length));
+    return text;
+}
+
+HMENU ControlId(int id) {
+    return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
+}
+
+void SetControlText(HWND parent, int id, const std::wstring& text) {
+    SetWindowTextW(GetDlgItem(parent, id), text.c_str());
+}
+
+void AppendLog(HWND log, const std::wstring& line) {
+    const int length = GetWindowTextLengthW(log);
+    SendMessageW(log, EM_SETSEL, length, length);
+    std::wstring text = line + L"\r\n";
+    SendMessageW(log, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+std::wstring SummaryText(const ScanSummary& summary) {
+    return L"VST2: " + std::to_wstring(summary.vst2Count) +
+        L" | VST3: " + std::to_wstring(summary.vst3Count) +
+        L" | CLAP: " + std::to_wstring(summary.clapCount) +
+        L" | AAX: " + std::to_wstring(summary.aaxCount) +
+        L" | Dubletten-Gruppen: " + std::to_wstring(summary.duplicateCount) +
+        L" | Eintraege: " + std::to_wstring(summary.duplicateEntryCount) +
+        L" | VST2 loeschbar: " + std::to_wstring(summary.vst2DuplicateCandidateCount);
+}
+
+void UpdateSummaryLabel(AppState& state) {
+    if (state.summaryLabel) {
+        SetWindowTextW(state.summaryLabel, SummaryText(state.summary).c_str());
+    }
+}
+
+void InsertColumn(HWND list, int index, const wchar_t* title, int width) {
+    LVCOLUMNW column{};
+    column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    column.pszText = const_cast<wchar_t*>(title);
+    column.cx = width;
+    column.iSubItem = index;
+    ListView_InsertColumn(list, index, &column);
+}
+
+void SetListText(HWND list, int row, int column, const std::wstring& text) {
+    ListView_SetItemText(list, row, column, const_cast<wchar_t*>(text.c_str()));
+}
+
+std::wstring FileSizeText(std::uintmax_t size) {
+    return std::to_wstring(size);
+}
+
+void PopulateResultsList(HWND list, const std::vector<PluginRecord>& records) {
+    ListView_DeleteAllItems(list);
+    for (int i = 0; i < static_cast<int>(records.size()); ++i) {
+        const auto& record = records[static_cast<std::size_t>(i)];
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = i;
+        item.iSubItem = 0;
+        item.pszText = const_cast<wchar_t*>(ToDisplayText(record.pluginType));
+        ListView_InsertItem(list, &item);
+
+        SetListText(list, i, 1, record.manufacturer);
+        SetListText(list, i, 2, record.pluginName);
+        SetListText(list, i, 3, record.category);
+        SetListText(list, i, 4, record.version);
+        SetListText(list, i, 5, FileSizeText(record.fileSize));
+        SetListText(list, i, 6, record.isPossibleDuplicate ? L"Ja" : L"Nein");
+        SetListText(list, i, 7, ToDisplayText(record.status));
+        SetListText(list, i, 8, record.filePath);
+    }
+}
+
+std::wstring SortText(const PluginRecord& record, int column) {
+    switch (column) {
+    case 0:
+        return ToDisplayText(record.pluginType);
+    case 1:
+        return record.manufacturer;
+    case 2:
+        return record.pluginName;
+    case 3:
+        return record.category;
+    case 4:
+        return record.version;
+    case 5:
+        return std::to_wstring(record.fileSize);
+    case 6:
+        return record.isPossibleDuplicate ? L"Ja" : L"Nein";
+    case 7:
+        return ToDisplayText(record.status);
+    case 8:
+        return record.filePath;
+    default:
+        return {};
+    }
+}
+
+void SortRecords(AppState& state, int column) {
+    if (state.sortColumn == column) {
+        state.sortAscending = !state.sortAscending;
+    } else {
+        state.sortColumn = column;
+        state.sortAscending = true;
+    }
+
+    std::sort(state.records.begin(), state.records.end(), [&](const PluginRecord& left, const PluginRecord& right) {
+        int cmp = 0;
+        if (column == 5) {
+            if (left.fileSize < right.fileSize) {
+                cmp = -1;
+            } else if (left.fileSize > right.fileSize) {
+                cmp = 1;
+            }
+        } else {
+            cmp = _wcsicmp(SortText(left, column).c_str(), SortText(right, column).c_str());
+        }
+        if (cmp == 0) {
+            cmp = _wcsicmp(left.pluginName.c_str(), right.pluginName.c_str());
+        }
+        return state.sortAscending ? cmp < 0 : cmp > 0;
+    });
+    PopulateResultsList(state.results, state.records);
+}
+
+HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent, nullptr, nullptr, nullptr);
+}
+
+HWND CreateEdit(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text,
+                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                           x, y, w, h, parent, ControlId(id), nullptr, nullptr);
+}
+
+HWND CreateButton(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"BUTTON", text,
+                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                           x, y, w, h, parent, ControlId(id), nullptr, nullptr);
+}
+
+std::wstring BrowseForFolder(HWND owner) {
+    BROWSEINFOW info{};
+    info.hwndOwner = owner;
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    info.lpszTitle = L"Ordner auswaehlen";
+
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info);
+    if (!item) {
+        return {};
+    }
+
+    wchar_t path[MAX_PATH]{};
+    SHGetPathFromIDListW(item, path);
+    CoTaskMemFree(item);
+    return path;
+}
+
+std::wstring BrowseForOutputFile(HWND owner, ReportFormat format) {
+    wchar_t fileName[MAX_PATH] = L"vst_plugin_report";
+    std::wstring extension = DefaultExtensionForFormat(format);
+    wcscat_s(fileName, extension.c_str());
+
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrFilter = L"HTML Report (*.html)\0*.html\0CSV Report (*.csv)\0*.csv\0Text Report (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrDefExt = extension.c_str() + 1;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (!GetSaveFileNameW(&ofn)) {
+        return {};
+    }
+    return fileName;
+}
+
+ReportFormat SelectedFormat(HWND combo) {
+    const LRESULT selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (selected == 1) {
+        return ReportFormat::Csv;
+    }
+    if (selected == 2) {
+        return ReportFormat::Txt;
+    }
+    return ReportFormat::Html;
+}
+
+std::wstring EnsureOutputExtension(std::wstring path, ReportFormat format) {
+    if (Trim(path).empty()) {
+        path = std::wstring(L"vst_plugin_report") + DefaultExtensionForFormat(format);
+    }
+    std::filesystem::path fsPath(path);
+    if (!fsPath.has_extension()) {
+        fsPath += DefaultExtensionForFormat(format);
+    }
+    return fsPath.wstring();
+}
+
+void SetRunningState(AppState& state, bool running) {
+    state.running = running;
+    EnableWindow(state.startButton, running ? FALSE : TRUE);
+    EnableWindow(state.stopButton, running ? TRUE : FALSE);
+    EnableWindow(state.exportButton, (!running && !state.records.empty()) ? TRUE : FALSE);
+    EnableWindow(state.cleanVst2DuplicatesButton, (!running && !state.records.empty()) ? TRUE : FALSE);
+    EnableWindow(state.cleanClapButton, (!running && !state.records.empty()) ? TRUE : FALSE);
+    EnableWindow(state.cleanAaxButton, (!running && !state.records.empty()) ? TRUE : FALSE);
+}
+
+void LayoutControls(HWND window, AppState& state) {
+    RECT rect{};
+    GetClientRect(window, &rect);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    const int margin = 16;
+    const int browseWidth = 90;
+    const int labelWidth = 110;
+    const int rowHeight = 26;
+    const int editX = margin + labelWidth + 4;
+    const int browseX = width - margin - browseWidth;
+    const int editWidth = std::max(120, browseX - editX - 10);
+
+    const int rows[][2] = {
+        {IDC_VST2_PATH, IDC_BROWSE_VST2},
+        {IDC_VST3_PATH, IDC_BROWSE_VST3},
+        {IDC_CLAP_PATH, IDC_BROWSE_CLAP},
+        {IDC_AAX_PATH, IDC_BROWSE_AAX},
+        {IDC_CUSTOM_PATH, IDC_BROWSE_CUSTOM},
+    };
+    const int yBase = 16;
+    for (int i = 0; i < 5; ++i) {
+        const int y = yBase + i * 36;
+        MoveWindow(GetDlgItem(window, rows[i][0]), editX, y, editWidth, 24, TRUE);
+        MoveWindow(GetDlgItem(window, rows[i][1]), browseX, y - 1, browseWidth, rowHeight, TRUE);
+    }
+
+    const int outputY = 196;
+    MoveWindow(state.formatCombo, editX, outputY, 160, 120, TRUE);
+    const int outputLabelX = editX + 180;
+    MoveWindow(GetDlgItem(window, IDC_OUTPUT_FILE), outputLabelX + 100, outputY, std::max(160, browseX - outputLabelX - 110), 24, TRUE);
+    MoveWindow(GetDlgItem(window, IDC_BROWSE_OUTPUT), browseX, outputY - 1, browseWidth, rowHeight, TRUE);
+
+    const int actionY = 236;
+    MoveWindow(state.startButton, margin, actionY, 110, 32, TRUE);
+    MoveWindow(state.stopButton, margin + 120, actionY, 110, 32, TRUE);
+    MoveWindow(state.exportButton, margin + 240, actionY, 110, 32, TRUE);
+    MoveWindow(state.cleanVst2DuplicatesButton, margin + 360, actionY, 120, 32, TRUE);
+    MoveWindow(state.cleanClapButton, margin + 490, actionY, 95, 32, TRUE);
+    MoveWindow(state.cleanAaxButton, margin + 595, actionY, 95, 32, TRUE);
+    MoveWindow(state.progress, margin + 700, actionY + 5, std::max(120, width - margin * 2 - 700), 22, TRUE);
+    MoveWindow(state.summaryLabel, margin, 276, width - margin * 2, 24, TRUE);
+    MoveWindow(state.status, margin, 300, width - margin * 2, 24, TRUE);
+
+    const int resultsY = 330;
+    const int logHeight = 100;
+    const int logY = std::max(resultsY + 140, height - margin - logHeight);
+    MoveWindow(state.results, margin, resultsY, width - margin * 2, std::max(120, logY - resultsY - 10), TRUE);
+    MoveWindow(state.log, margin, logY, width - margin * 2, logHeight, TRUE);
+}
+
+void StartScan(AppState& state) {
+    if (state.running) {
+        return;
+    }
+    if (state.worker.joinable()) {
+        state.worker.join();
+    }
+
+    const ScanOptions options{
+        GetWindowTextString(GetDlgItem(state.window, IDC_VST2_PATH)),
+        GetWindowTextString(GetDlgItem(state.window, IDC_VST3_PATH)),
+        GetWindowTextString(GetDlgItem(state.window, IDC_CLAP_PATH)),
+        GetWindowTextString(GetDlgItem(state.window, IDC_AAX_PATH)),
+        GetWindowTextString(GetDlgItem(state.window, IDC_CUSTOM_PATH)),
+    };
+
+    SendMessageW(state.progress, PBM_SETPOS, 0, 0);
+    ListView_DeleteAllItems(state.results);
+    state.records.clear();
+    state.summary = ScanSummary{};
+    state.sortColumn = -1;
+    UpdateSummaryLabel(state);
+    EnableWindow(state.exportButton, FALSE);
+    SetWindowTextW(state.status, L"Scan startet...");
+    SetWindowTextW(state.log, L"");
+    state.stopRequested.store(false);
+    SetRunningState(state, true);
+
+    HWND window = state.window;
+    std::atomic_bool* stopFlag = &state.stopRequested;
+    state.worker = std::thread([window, stopFlag, options]() {
+        ScannerEngine engine;
+        ScanResult result = engine.Scan(
+            options,
+            *stopFlag,
+            [window](const ScanProgress& progress) {
+                auto* message = new ProgressMessage{ progress.current, progress.total, progress.message };
+                PostMessageW(window, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(message));
+            },
+            [window](const std::wstring& line) {
+                auto* message = new std::wstring(line);
+                PostMessageW(window, WM_SCAN_LOG, 0, reinterpret_cast<LPARAM>(message));
+            });
+
+        auto* done = new DoneMessage;
+        done->stopped = stopFlag->load();
+        done->summary = std::move(result.summary);
+        done->records = std::move(result.records);
+        PostMessageW(window, WM_SCAN_DONE, 0, reinterpret_cast<LPARAM>(done));
+    });
+}
+
+void ExportResults(AppState& state) {
+    if (state.running || state.records.empty()) {
+        return;
+    }
+
+    const ReportFormat format = SelectedFormat(state.formatCombo);
+    const std::wstring outputPath = EnsureOutputExtension(
+        GetWindowTextString(GetDlgItem(state.window, IDC_OUTPUT_FILE)),
+        format);
+    SetControlText(state.window, IDC_OUTPUT_FILE, outputPath);
+
+    ReportWriter writer;
+    std::wstring error;
+    if (writer.Write(outputPath, format, state.records, state.summary, error)) {
+        SetWindowTextW(state.status, L"Export abgeschlossen.");
+        AppendLog(state.log, L"Export: " + outputPath);
+    } else {
+        SetWindowTextW(state.status, L"Export fehlgeschlagen.");
+        AppendLog(state.log, L"Fehler: " + error);
+        MessageBoxW(state.window, error.c_str(), L"Export fehlgeschlagen", MB_OK | MB_ICONERROR);
+    }
+}
+
+bool MovePathToRecycleBin(HWND owner, const std::wstring& path, std::wstring& error) {
+    std::wstring doubleNullPath = path;
+    doubleNullPath.push_back(L'\0');
+    doubleNullPath.push_back(L'\0');
+
+    SHFILEOPSTRUCTW operation{};
+    operation.hwnd = owner;
+    operation.wFunc = FO_DELETE;
+    operation.pFrom = doubleNullPath.c_str();
+    operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+
+    const int result = SHFileOperationW(&operation);
+    if (result != 0 || operation.fAnyOperationsAborted) {
+        error = L"Pfad konnte nicht in den Papierkorb verschoben werden: " + path;
+        return false;
+    }
+    return true;
+}
+
+void RefreshAfterDeletion(AppState& state) {
+    DuplicateDetector detector;
+    detector.MarkDuplicates(state.records);
+    state.summary = BuildSummary(state.records, state.summary.scannedPaths, state.summary.scanTimestamp);
+    PopulateResultsList(state.results, state.records);
+    UpdateSummaryLabel(state);
+    SetRunningState(state, false);
+}
+
+void OpenSelectedInExplorer(AppState& state) {
+    const int selected = ListView_GetNextItem(state.results, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= static_cast<int>(state.records.size())) {
+        return;
+    }
+    const std::wstring args = L"/select,\"" + state.records[static_cast<std::size_t>(selected)].filePath + L"\"";
+    ShellExecuteW(state.window, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void DeleteSelectedRecord(AppState& state) {
+    const int selected = ListView_GetNextItem(state.results, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= static_cast<int>(state.records.size())) {
+        return;
+    }
+
+    const auto index = static_cast<std::size_t>(selected);
+    const std::wstring message =
+        L"Diesen Eintrag in den Papierkorb verschieben?\n\n" +
+        state.records[index].filePath;
+    if (MessageBoxW(state.window, message.c_str(), L"Datei loeschen", MB_YESNO | MB_ICONWARNING) != IDYES) {
+        return;
+    }
+
+    std::wstring error;
+    if (MovePathToRecycleBin(state.window, state.records[index].filePath, error)) {
+        AppendLog(state.log, L"Geloescht: " + state.records[index].filePath);
+        state.records.erase(state.records.begin() + static_cast<std::ptrdiff_t>(index));
+        RefreshAfterDeletion(state);
+    } else {
+        AppendLog(state.log, L"Fehler: " + error);
+        MessageBoxW(state.window, error.c_str(), L"Loeschen fehlgeschlagen", MB_OK | MB_ICONERROR);
+    }
+}
+
+template <typename Predicate>
+void DeleteMatchingRecords(AppState& state, const std::wstring& label, Predicate predicate) {
+    std::vector<std::size_t> indexes;
+    for (std::size_t i = 0; i < state.records.size(); ++i) {
+        if (predicate(state.records[i])) {
+            indexes.push_back(i);
+        }
+    }
+
+    if (indexes.empty()) {
+        MessageBoxW(state.window, L"Keine passenden Eintraege gefunden.", label.c_str(), MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const std::wstring message =
+        std::to_wstring(indexes.size()) +
+        L" Eintraege in den Papierkorb verschieben?\n\nVST3-Dateien werden durch diese Aktion nicht geloescht.";
+    if (MessageBoxW(state.window, message.c_str(), label.c_str(), MB_YESNO | MB_ICONWARNING) != IDYES) {
+        return;
+    }
+
+    std::size_t deleted = 0;
+    for (auto it = indexes.rbegin(); it != indexes.rend(); ++it) {
+        std::wstring error;
+        const auto index = *it;
+        if (MovePathToRecycleBin(state.window, state.records[index].filePath, error)) {
+            AppendLog(state.log, L"Geloescht: " + state.records[index].filePath);
+            state.records.erase(state.records.begin() + static_cast<std::ptrdiff_t>(index));
+            ++deleted;
+        } else {
+            AppendLog(state.log, L"Fehler: " + error);
+        }
+    }
+
+    RefreshAfterDeletion(state);
+    SetWindowTextW(state.status, (label + L": " + std::to_wstring(deleted) + L" Eintraege geloescht.").c_str());
+}
+
+void DeleteVst2Duplicates(AppState& state) {
+    DeleteMatchingRecords(state, L"VST2-Dubletten loeschen", [](const PluginRecord& record) {
+        return record.pluginType == PluginType::Vst2 && record.isPossibleDuplicate;
+    });
+}
+
+void DeleteClapRecords(AppState& state) {
+    DeleteMatchingRecords(state, L"CLAP loeschen", [](const PluginRecord& record) {
+        return record.pluginType == PluginType::Clap;
+    });
+}
+
+void DeleteAaxRecords(AppState& state) {
+    DeleteMatchingRecords(state, L"AAX loeschen", [](const PluginRecord& record) {
+        return record.pluginType == PluginType::Aax;
+    });
+}
+
+void StopScan(AppState& state) {
+    if (!state.running) {
+        return;
+    }
+    state.stopRequested.store(true);
+    SetWindowTextW(state.status, L"Stop angefordert...");
+    AppendLog(state.log, L"Stop angefordert. Der aktuelle Dateizugriff wird noch sauber beendet.");
+}
+
+void CreateMainControls(HWND window, AppState& state) {
+    CreateLabel(window, L"VST2-Pfad", 16, 18, 110, 22);
+    CreateEdit(window, IDC_VST2_PATH, L"C:\\Program Files\\Vstplugins", 130, 16, 600, 24);
+    CreateButton(window, IDC_BROWSE_VST2, L"Browse", 740, 15, 90, 26);
+
+    CreateLabel(window, L"VST3-Pfad", 16, 54, 110, 22);
+    CreateEdit(window, IDC_VST3_PATH, L"C:\\Program Files\\Common Files\\VST3", 130, 52, 600, 24);
+    CreateButton(window, IDC_BROWSE_VST3, L"Browse", 740, 51, 90, 26);
+
+    CreateLabel(window, L"CLAP-Pfad", 16, 90, 110, 22);
+    CreateEdit(window, IDC_CLAP_PATH, L"C:\\Program Files\\Common Files\\CLAP", 130, 88, 600, 24);
+    CreateButton(window, IDC_BROWSE_CLAP, L"Browse", 740, 87, 90, 26);
+
+    CreateLabel(window, L"AAX-Pfad", 16, 126, 110, 22);
+    CreateEdit(window, IDC_AAX_PATH, L"C:\\Program Files\\Common Files\\Avid\\Audio\\Plug-Ins", 130, 124, 600, 24);
+    CreateButton(window, IDC_BROWSE_AAX, L"Browse", 740, 123, 90, 26);
+
+    CreateLabel(window, L"Custom-Pfad", 16, 162, 110, 22);
+    CreateEdit(window, IDC_CUSTOM_PATH, L"", 130, 160, 600, 24);
+    CreateButton(window, IDC_BROWSE_CUSTOM, L"Browse", 740, 159, 90, 26);
+
+    CreateLabel(window, L"Ausgabeformat", 16, 200, 110, 22);
+    state.formatCombo = CreateWindowExW(0, WC_COMBOBOXW, L"",
+                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                        130, 196, 160, 120, window, ControlId(IDC_FORMAT), nullptr, nullptr);
+    SendMessageW(state.formatCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HTML"));
+    SendMessageW(state.formatCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"CSV"));
+    SendMessageW(state.formatCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"TXT"));
+    SendMessageW(state.formatCombo, CB_SETCURSEL, 0, 0);
+
+    CreateLabel(window, L"Ausgabedatei", 310, 200, 100, 22);
+    CreateEdit(window, IDC_OUTPUT_FILE, L"vst_plugin_report.html", 410, 196, 320, 24);
+    CreateButton(window, IDC_BROWSE_OUTPUT, L"Browse", 740, 195, 90, 26);
+    state.summaryLabel = CreateLabel(window, L"VST2: 0 | VST3: 0 | CLAP: 0 | AAX: 0 | Dubletten-Gruppen: 0 | Eintraege: 0 | VST2 loeschbar: 0", 16, 276, 760, 22);
+
+    state.startButton = CreateButton(window, IDC_START, L"Start Scan", 16, 236, 110, 32);
+    state.stopButton = CreateButton(window, IDC_STOP, L"Stop Scan", 136, 236, 110, 32);
+    state.exportButton = CreateButton(window, IDC_EXPORT, L"Export", 256, 236, 110, 32);
+    state.cleanVst2DuplicatesButton = CreateButton(window, IDC_CLEAN_VST2_DUP, L"Del VST2 Dup", 376, 236, 120, 32);
+    state.cleanClapButton = CreateButton(window, IDC_CLEAN_CLAP, L"Del CLAP", 506, 236, 95, 32);
+    state.cleanAaxButton = CreateButton(window, IDC_CLEAN_AAX, L"Del AAX", 611, 236, 95, 32);
+    EnableWindow(state.stopButton, FALSE);
+    EnableWindow(state.exportButton, FALSE);
+    EnableWindow(state.cleanVst2DuplicatesButton, FALSE);
+    EnableWindow(state.cleanClapButton, FALSE);
+    EnableWindow(state.cleanAaxButton, FALSE);
+
+    state.progress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
+                                     WS_CHILD | WS_VISIBLE,
+                                     260, 241, 570, 22, window, ControlId(IDC_PROGRESS), nullptr, nullptr);
+    SendMessageW(state.progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+
+    state.status = CreateWindowExW(0, L"STATIC", L"Bereit.",
+                                   WS_CHILD | WS_VISIBLE,
+                                   16, 282, 814, 24, window, ControlId(IDC_STATUS), nullptr, nullptr);
+
+    state.results = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
+                                    16, 310, 814, 220, window, ControlId(IDC_RESULTS), nullptr, nullptr);
+    ListView_SetExtendedListViewStyle(state.results, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    InsertColumn(state.results, 0, L"Typ", 56);
+    InsertColumn(state.results, 1, L"Hersteller", 140);
+    InsertColumn(state.results, 2, L"Plugin", 170);
+    InsertColumn(state.results, 3, L"Kategorie", 110);
+    InsertColumn(state.results, 4, L"Version", 90);
+    InsertColumn(state.results, 5, L"Groesse", 90);
+    InsertColumn(state.results, 6, L"Dublette", 80);
+    InsertColumn(state.results, 7, L"Status", 150);
+    InsertColumn(state.results, 8, L"Pfad", 520);
+
+    state.log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                                16, 540, 814, 100, window, ControlId(IDC_LOG), nullptr, nullptr);
+    SetWindowTextW(window, (std::wstring(L"Windows VST Plugin Scanner ") + APP_VERSION).c_str());
+    LayoutControls(window, state);
+}
+
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_CREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<AppState*>(create->lpCreateParams);
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        CreateMainControls(window, *state);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (!state) {
+            break;
+        }
+        switch (LOWORD(wParam)) {
+        case IDC_START:
+            StartScan(*state);
+            return 0;
+        case IDC_STOP:
+            StopScan(*state);
+            return 0;
+        case IDC_EXPORT:
+            ExportResults(*state);
+            return 0;
+        case IDC_CLEAN_VST2_DUP:
+            DeleteVst2Duplicates(*state);
+            return 0;
+        case IDC_CLEAN_CLAP:
+            DeleteClapRecords(*state);
+            return 0;
+        case IDC_CLEAN_AAX:
+            DeleteAaxRecords(*state);
+            return 0;
+        case IDC_BROWSE_VST2:
+        case IDC_BROWSE_VST3:
+        case IDC_BROWSE_CLAP:
+        case IDC_BROWSE_AAX:
+        case IDC_BROWSE_CUSTOM: {
+            const std::wstring folder = BrowseForFolder(window);
+            if (!folder.empty()) {
+                int target = IDC_CUSTOM_PATH;
+                if (LOWORD(wParam) == IDC_BROWSE_VST2) {
+                    target = IDC_VST2_PATH;
+                } else if (LOWORD(wParam) == IDC_BROWSE_VST3) {
+                    target = IDC_VST3_PATH;
+                } else if (LOWORD(wParam) == IDC_BROWSE_CLAP) {
+                    target = IDC_CLAP_PATH;
+                } else if (LOWORD(wParam) == IDC_BROWSE_AAX) {
+                    target = IDC_AAX_PATH;
+                }
+                SetControlText(window, target, folder);
+            }
+            return 0;
+        }
+        case IDC_BROWSE_OUTPUT: {
+            const std::wstring file = BrowseForOutputFile(window, SelectedFormat(state->formatCombo));
+            if (!file.empty()) {
+                SetControlText(window, IDC_OUTPUT_FILE, file);
+            }
+            return 0;
+        }
+        case IDC_FORMAT:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                const ReportFormat format = SelectedFormat(state->formatCombo);
+                SetControlText(window, IDC_OUTPUT_FILE, std::wstring(L"vst_plugin_report") + DefaultExtensionForFormat(format));
+            }
+            return 0;
+        default:
+            break;
+        }
+        break;
+    case WM_CONTEXTMENU:
+        if (state && reinterpret_cast<HWND>(wParam) == state->results) {
+            POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (point.x == -1 && point.y == -1) {
+                const int selected = ListView_GetNextItem(state->results, -1, LVNI_SELECTED);
+                if (selected < 0) {
+                    return 0;
+                }
+                RECT itemRect{};
+                ListView_GetItemRect(state->results, selected, &itemRect, LVIR_BOUNDS);
+                point.x = itemRect.left;
+                point.y = itemRect.bottom;
+                ClientToScreen(state->results, &point);
+            }
+
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, IDM_OPEN_IN_EXPLORER, L"Zielpfad im Explorer oeffnen");
+            AppendMenuW(menu, MF_STRING, IDM_DELETE_SELECTED, L"Datei/Bundle loeschen");
+            const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window, nullptr);
+            DestroyMenu(menu);
+
+            if (command == IDM_OPEN_IN_EXPLORER) {
+                OpenSelectedInExplorer(*state);
+            } else if (command == IDM_DELETE_SELECTED) {
+                DeleteSelectedRecord(*state);
+            }
+            return 0;
+        }
+        break;
+    case WM_NOTIFY:
+        if (state) {
+            auto* header = reinterpret_cast<NMHDR*>(lParam);
+            if (header && header->idFrom == IDC_RESULTS && header->code == LVN_COLUMNCLICK) {
+                auto* listInfo = reinterpret_cast<NMLISTVIEW*>(lParam);
+                SortRecords(*state, listInfo->iSubItem);
+                return 0;
+            }
+        }
+        break;
+    case WM_SCAN_PROGRESS: {
+        std::unique_ptr<ProgressMessage> progress(reinterpret_cast<ProgressMessage*>(lParam));
+        if (state && progress) {
+            int percent = 0;
+            if (progress->total > 0) {
+                percent = static_cast<int>((progress->current * 100) / progress->total);
+            }
+            SendMessageW(state->progress, PBM_SETPOS, percent, 0);
+            SetWindowTextW(state->status, progress->message.c_str());
+        }
+        return 0;
+    }
+    case WM_SCAN_LOG: {
+        std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lParam));
+        if (state && line) {
+            AppendLog(state->log, *line);
+        }
+        return 0;
+    }
+    case WM_SCAN_DONE: {
+        std::unique_ptr<DoneMessage> done(reinterpret_cast<DoneMessage*>(lParam));
+        if (state && done) {
+            if (state->worker.joinable()) {
+                state->worker.join();
+            }
+            SetRunningState(*state, false);
+            state->summary = std::move(done->summary);
+            state->records = std::move(done->records);
+            PopulateResultsList(state->results, state->records);
+            UpdateSummaryLabel(*state);
+            if (done->stopped) {
+                SetWindowTextW(state->status, L"Scan abgebrochen. Ergebnisse koennen exportiert werden.");
+                AppendLog(state->log, L"Scan abgebrochen.");
+            } else {
+                SendMessageW(state->progress, PBM_SETPOS, 0, 0);
+                SetWindowTextW(state->status, L"Scan abgeschlossen. Bitte Export klicken, um einen Report zu schreiben.");
+                AppendLog(state->log, L"Scan abgeschlossen.");
+            }
+            EnableWindow(state->exportButton, state->records.empty() ? FALSE : TRUE);
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (state && state->results) {
+            LayoutControls(window, *state);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (state && state->running) {
+            state->stopRequested.store(true);
+            MessageBoxW(window, L"Ein Scan laeuft noch. Bitte kurz warten, bis der Worker beendet ist.", L"Scan laeuft", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        if (state) {
+            state->stopRequested.store(true);
+            if (state->worker.joinable()) {
+                state->worker.join();
+            }
+        }
+        PostQuitMessage(0);
+        return 0;
+    default:
+        break;
+    }
+
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    INITCOMMONCONTROLSEX controls{};
+    controls.dwSize = sizeof(controls);
+    controls.dwICC = ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES;
+    InitCommonControlsEx(&controls);
+
+    OleInitialize(nullptr);
+
+    const wchar_t className[] = L"VstPluginScannerWindow";
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = WindowProc;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    windowClass.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = className;
+    RegisterClassExW(&windowClass);
+
+    AppState state;
+    HWND window = CreateWindowExW(
+        0,
+        className,
+        L"Windows VST Plugin Scanner 1.0.0.0",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        870,
+        710,
+        nullptr,
+        nullptr,
+        instance,
+        &state);
+
+    if (!window) {
+        OleUninitialize();
+        return 1;
+    }
+
+    ShowWindow(window, showCommand);
+    UpdateWindow(window);
+
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0)) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    OleUninitialize();
+    return static_cast<int>(message.wParam);
+}

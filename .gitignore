@@ -1,0 +1,41 @@
+﻿# Visual Studio / Build
+.vs/
+x64/
+Debug/
+Release/
+build/
+dist/
+
+# Compiled / linker outputs
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.exp
+*.res
+*.iobj
+*.ipdb
+*.recipe
+
+# MSBuild logs/state
+*.tlog
+*.lastbuildstate
+
+# User-specific Visual Studio files
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Temporary / backup
+*.tmp
+*.bak
+*.zip
+*.log
+
+# Scanner reports
+vst_plugin_report*.csv
+vst_plugin_report*.html
+vst_plugin_report*.txt
+cleanup_log*.txt
