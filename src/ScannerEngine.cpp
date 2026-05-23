@@ -2,6 +2,7 @@
 
 #include "DuplicateDetector.h"
 #include "MetadataReader.h"
+#include "PluginUserPrefs.h"
 #include "StringUtil.h"
 
 #include <Windows.h>
@@ -362,6 +363,14 @@ ScanResult ScannerEngine::Scan(const ScanOptions& options,
 
     DuplicateDetector detector;
     detector.MarkDuplicates(result.records);
+
+    const PluginUserPrefsResult userPrefs = ApplyPluginUserPrefs(PluginUserPrefsPathNextToExe(), result.records);
+    if (!userPrefs.warningMessage.empty()) {
+        onLog(userPrefs.warningMessage);
+    } else if (userPrefs.rulesLoaded) {
+        onLog(L"plugin_rules_userprefs.json angewendet: " + std::to_wstring(userPrefs.appliedCount) + L" Eintraege aktualisiert.");
+    }
+
     result.summary = BuildSummary(result.records, result.summary.scannedPaths, result.summary.scanTimestamp);
 
     onProgress({ result.records.size(), total, stopRequested.load() ? L"Scan abgebrochen." : L"Scan abgeschlossen." });

@@ -70,6 +70,7 @@
     <ClInclude Include="include\DuplicateDetector.h" />
     <ClInclude Include="include\MetadataReader.h" />
     <ClInclude Include="include\PluginRecord.h" />
+    <ClInclude Include="include\PluginUserPrefs.h" />
     <ClInclude Include="include\ReportWriter.h" />
     <ClInclude Include="include\ScannerEngine.h" />
     <ClInclude Include="include\StringUtil.h" />
@@ -78,6 +79,7 @@
   <ItemGroup>
     <ClCompile Include="src\DuplicateDetector.cpp" />
     <ClCompile Include="src\MetadataReader.cpp" />
+    <ClCompile Include="src\PluginUserPrefs.cpp" />
     <ClCompile Include="src\ReportWriter.cpp" />
     <ClCompile Include="src\ScannerEngine.cpp" />
     <ClCompile Include="src\StringUtil.cpp" />
@@ -85,6 +87,11 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="VstPluginScanner.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="plugin_rules_userprefs.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

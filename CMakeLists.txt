@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(VstPluginScanner WIN32
     src/DuplicateDetector.cpp
     src/MetadataReader.cpp
+    src/PluginUserPrefs.cpp
     src/ReportWriter.cpp
     src/ScannerEngine.cpp
     src/StringUtil.cpp

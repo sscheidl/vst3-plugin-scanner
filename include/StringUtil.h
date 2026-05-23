@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,6 @@ std::wstring NormalizePluginKey(const std::wstring& value);
 std::wstring HtmlEscape(const std::wstring& value);
 std::wstring CsvEscape(const std::wstring& value);
 std::wstring FormatFileTime(const std::filesystem::file_time_type& value);
+std::wstring FormatFileSize(std::uintmax_t bytes);
 std::wstring CurrentTimestamp();
 std::wstring JoinPathList(const std::vector<std::wstring>& paths);
-

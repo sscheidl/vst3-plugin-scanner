@@ -38,4 +38,10 @@ if (-not (Test-Path $exe)) {
     throw "Build abgeschlossen, aber EXE nicht gefunden: $exe"
 }
 
+$rulesSource = Join-Path $root "plugin_rules_userprefs.json"
+$rulesTarget = Join-Path (Split-Path -Parent $exe) "plugin_rules_userprefs.json"
+if (Test-Path $rulesSource) {
+    Copy-Item $rulesSource $rulesTarget -Force
+}
+
 Write-Host "Build erfolgreich: $exe"

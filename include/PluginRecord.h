@@ -33,6 +33,9 @@ struct PluginRecord {
     bool isPossibleDuplicate = false;
     ScanStatus status = ScanStatus::Unknown;
     std::wstring warningMessage;
+    bool metadataFromJson = false;
+    bool metadataFromManualOverrides = false;
+    bool manuallyEdited = false;
 };
 
 struct ScanSummary {
@@ -77,4 +80,18 @@ struct ScanSummary {
     default:
         return L"unbekannt";
     }
+}
+
+[[nodiscard]] inline std::wstring ToDisplayText(const PluginRecord& record) {
+    std::wstring text = ToDisplayText(record.status);
+    if (record.metadataFromJson) {
+        text += L" | Daten aus JSON";
+    }
+    if (record.metadataFromManualOverrides) {
+        text += L" | Daten aus manualOverrides";
+    }
+    if (record.manuallyEdited) {
+        text += L" | Manuell editiert";
+    }
+    return text;
 }

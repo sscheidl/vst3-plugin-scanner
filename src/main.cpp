@@ -2,6 +2,7 @@
 #include "ScannerEngine.h"
 #include "StringUtil.h"
 #include "DuplicateDetector.h"
+#include "PluginUserPrefs.h"
 
 #include <Windows.h>
 #include <windowsx.h>
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <cwchar>
 #include <string>
@@ -51,11 +53,14 @@ constexpr int IDC_SUMMARY = 1021;
 constexpr int IDC_CLEAN_VST2_DUP = 1022;
 constexpr int IDC_CLEAN_CLAP = 1023;
 constexpr int IDC_CLEAN_AAX = 1024;
+constexpr int IDC_EDIT_JSON = 1025;
+constexpr int IDC_SAVE_OVERRIDES = 1026;
+constexpr int IDC_INLINE_EDIT = 1027;
 
 constexpr UINT IDM_OPEN_IN_EXPLORER = 40001;
 constexpr UINT IDM_DELETE_SELECTED = 40002;
 
-constexpr wchar_t APP_VERSION[] = L"1.0.0.0";
+constexpr wchar_t APP_VERSION[] = L"1.0.1.0";
 
 constexpr UINT WM_SCAN_PROGRESS = WM_APP + 1;
 constexpr UINT WM_SCAN_LOG = WM_APP + 2;
@@ -82,6 +87,8 @@ struct AppState {
     HWND startButton = nullptr;
     HWND stopButton = nullptr;
     HWND exportButton = nullptr;
+    HWND editJsonButton = nullptr;
+    HWND saveOverridesButton = nullptr;
     HWND cleanVst2DuplicatesButton = nullptr;
     HWND cleanClapButton = nullptr;
     HWND cleanAaxButton = nullptr;
@@ -94,6 +101,9 @@ struct AppState {
     int sortColumn = -1;
     bool sortAscending = true;
     bool running = false;
+    HWND inlineEdit = nullptr;
+    int editRow = -1;
+    int editColumn = -1;
 };
 
 std::wstring GetWindowTextString(HWND control) {
@@ -137,6 +147,16 @@ void UpdateSummaryLabel(AppState& state) {
     }
 }
 
+bool HasManualEdits(const AppState& state) {
+    return std::any_of(state.records.begin(), state.records.end(), [](const PluginRecord& record) {
+        return record.manuallyEdited;
+    });
+}
+
+bool IsEditableColumn(int column) {
+    return column == 1 || column == 2 || column == 3;
+}
+
 void InsertColumn(HWND list, int index, const wchar_t* title, int width) {
     LVCOLUMNW column{};
     column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -151,7 +171,7 @@ void SetListText(HWND list, int row, int column, const std::wstring& text) {
 }
 
 std::wstring FileSizeText(std::uintmax_t size) {
-    return std::to_wstring(size);
+    return FormatFileSize(size);
 }
 
 void PopulateResultsList(HWND list, const std::vector<PluginRecord>& records) {
@@ -171,7 +191,7 @@ void PopulateResultsList(HWND list, const std::vector<PluginRecord>& records) {
         SetListText(list, i, 4, record.version);
         SetListText(list, i, 5, FileSizeText(record.fileSize));
         SetListText(list, i, 6, record.isPossibleDuplicate ? L"Ja" : L"Nein");
-        SetListText(list, i, 7, ToDisplayText(record.status));
+        SetListText(list, i, 7, ToDisplayText(record));
         SetListText(list, i, 8, record.filePath);
     }
 }
@@ -193,7 +213,7 @@ std::wstring SortText(const PluginRecord& record, int column) {
     case 6:
         return record.isPossibleDuplicate ? L"Ja" : L"Nein";
     case 7:
-        return ToDisplayText(record.status);
+        return ToDisplayText(record);
     case 8:
         return record.filePath;
     default:
@@ -226,6 +246,133 @@ void SortRecords(AppState& state, int column) {
         return state.sortAscending ? cmp < 0 : cmp > 0;
     });
     PopulateResultsList(state.results, state.records);
+}
+
+void FinishInlineEdit(AppState& state, bool commit);
+
+LRESULT CALLBACK InlineEditProc(HWND edit, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR refData) {
+    auto* state = reinterpret_cast<AppState*>(refData);
+    switch (message) {
+    case WM_GETDLGCODE:
+        return DLGC_WANTALLKEYS;
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            FinishInlineEdit(*state, true);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            FinishInlineEdit(*state, false);
+            return 0;
+        }
+        break;
+    case WM_KILLFOCUS:
+        if (state && state->inlineEdit == edit) {
+            FinishInlineEdit(*state, true);
+            return 0;
+        }
+        break;
+    default:
+        break;
+    }
+    return DefSubclassProc(edit, message, wParam, lParam);
+}
+
+void UpdateEditedRecordField(PluginRecord& record, int column, const std::wstring& value) {
+    if (column == 1) {
+        record.manufacturer = value;
+    } else if (column == 2) {
+        record.pluginName = value;
+    } else if (column == 3) {
+        record.category = value;
+    }
+}
+
+std::wstring EditedRecordField(const PluginRecord& record, int column) {
+    if (column == 1) {
+        return record.manufacturer;
+    }
+    if (column == 2) {
+        return record.pluginName;
+    }
+    if (column == 3) {
+        return record.category;
+    }
+    return {};
+}
+
+void FinishInlineEdit(AppState& state, bool commit) {
+    HWND edit = state.inlineEdit;
+    if (!edit) {
+        return;
+    }
+
+    const int row = state.editRow;
+    const int column = state.editColumn;
+    state.inlineEdit = nullptr;
+    state.editRow = -1;
+    state.editColumn = -1;
+
+    if (commit &&
+        row >= 0 &&
+        column >= 0 &&
+        row < static_cast<int>(state.records.size()) &&
+        IsEditableColumn(column)) {
+        const std::wstring value = Trim(GetWindowTextString(edit));
+        PluginRecord& record = state.records[static_cast<std::size_t>(row)];
+        UpdateEditedRecordField(record, column, value);
+        record.manuallyEdited = true;
+        record.metadataFromManualOverrides = false;
+
+        SetListText(state.results, row, 1, record.manufacturer);
+        SetListText(state.results, row, 2, record.pluginName);
+        SetListText(state.results, row, 3, record.category);
+        SetListText(state.results, row, 7, ToDisplayText(record));
+        EnableWindow(state.saveOverridesButton, TRUE);
+        SetWindowTextW(state.status, L"Manuelle Aenderung uebernommen.");
+    }
+
+    RemoveWindowSubclass(edit, InlineEditProc, 1);
+    DestroyWindow(edit);
+}
+
+void StartInlineEdit(AppState& state, int row, int column) {
+    if (!IsEditableColumn(column) ||
+        row < 0 ||
+        row >= static_cast<int>(state.records.size()) ||
+        state.running) {
+        return;
+    }
+
+    FinishInlineEdit(state, true);
+
+    RECT rect{};
+    if (!ListView_GetSubItemRect(state.results, row, column, LVIR_BOUNDS, &rect)) {
+        return;
+    }
+
+    const std::wstring value = EditedRecordField(state.records[static_cast<std::size_t>(row)], column);
+    state.inlineEdit = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT",
+        value.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        state.results,
+        ControlId(IDC_INLINE_EDIT),
+        nullptr,
+        nullptr);
+    if (!state.inlineEdit) {
+        return;
+    }
+
+    state.editRow = row;
+    state.editColumn = column;
+    SetWindowSubclass(state.inlineEdit, InlineEditProc, 1, reinterpret_cast<DWORD_PTR>(&state));
+    SendMessageW(state.inlineEdit, EM_SETSEL, 0, -1);
+    SetFocus(state.inlineEdit);
 }
 
 HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
@@ -281,6 +428,137 @@ std::wstring BrowseForOutputFile(HWND owner, ReportFormat format) {
     return fileName;
 }
 
+std::filesystem::path ExeDirectory() {
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    while (length == buffer.size()) {
+        buffer.resize(buffer.size() * 2);
+        length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    }
+    if (length == 0) {
+        return {};
+    }
+    buffer.resize(length);
+    return std::filesystem::path(buffer).parent_path();
+}
+
+void AddUniqueJsonCandidate(std::vector<std::filesystem::path>& candidates,
+                            const std::filesystem::path& directory) {
+    if (directory.empty()) {
+        return;
+    }
+
+    const std::filesystem::path candidate = directory / L"plugin_rules_userprefs.json";
+    const std::wstring key = ToLower(candidate.wstring());
+    for (const auto& existing : candidates) {
+        if (ToLower(existing.wstring()) == key) {
+            return;
+        }
+    }
+    candidates.push_back(candidate);
+}
+
+std::vector<std::filesystem::path> JsonRuleCandidates() {
+    std::vector<std::filesystem::path> candidates;
+
+    const std::filesystem::path exeDir = ExeDirectory();
+    AddUniqueJsonCandidate(candidates, exeDir);
+
+    std::error_code ec;
+    AddUniqueJsonCandidate(candidates, std::filesystem::current_path(ec));
+
+    const std::filesystem::path configName = exeDir.filename();
+    const std::filesystem::path platformName = exeDir.parent_path().filename();
+    if ((ToLower(configName.wstring()) == L"debug" || ToLower(configName.wstring()) == L"release") &&
+        !platformName.empty()) {
+        AddUniqueJsonCandidate(candidates, exeDir.parent_path().parent_path());
+    }
+
+    return candidates;
+}
+
+std::filesystem::path FindJsonRulesFile() {
+    std::error_code ec;
+    for (const auto& candidate : JsonRuleCandidates()) {
+        if (std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return {};
+}
+
+bool WriteJsonTemplate(const std::filesystem::path& path) {
+    std::ofstream stream(path, std::ios::binary);
+    if (!stream) {
+        return false;
+    }
+    stream <<
+        "{\r\n"
+        "  \"schemaVersion\": \"0.3-userprefs\",\r\n"
+        "  \"vendorAliases\": {},\r\n"
+        "  \"vendorRules\": [],\r\n"
+        "  \"pluginRules\": []\r\n"
+        "}\r\n";
+    return stream.good();
+}
+
+std::filesystem::path CreateJsonTemplateFile() {
+    const auto candidates = JsonRuleCandidates();
+    if (!candidates.empty() && WriteJsonTemplate(candidates.front())) {
+        return candidates.front();
+    }
+
+    std::error_code ec;
+    const std::filesystem::path fallback =
+        std::filesystem::current_path(ec) / L"plugin_rules_userprefs.json";
+    if (!ec && WriteJsonTemplate(fallback)) {
+        return fallback;
+    }
+    return {};
+}
+
+std::wstring QuoteArgument(const std::filesystem::path& path) {
+    return L"\"" + path.wstring() + L"\"";
+}
+
+std::filesystem::path FindEditorExecutable() {
+    const std::filesystem::path candidates[] = {
+        L"C:\\Program Files\\Notepad++\\notepad++.exe",
+        L"C:\\Program Files (x86)\\Notepad++\\notepad++.exe",
+    };
+
+    std::error_code ec;
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        ec.clear();
+    }
+
+    wchar_t pathBuffer[MAX_PATH]{};
+    const DWORD pathLength = SearchPathW(nullptr, L"notepad++.exe", nullptr, MAX_PATH, pathBuffer, nullptr);
+    if (pathLength > 0 && pathLength < MAX_PATH) {
+        return pathBuffer;
+    }
+
+    return L"notepad.exe";
+}
+
+bool LaunchEditor(const std::filesystem::path& editor,
+                  const std::filesystem::path& jsonPath,
+                  HWND owner) {
+    const std::wstring parameters = QuoteArgument(jsonPath);
+    const HINSTANCE result = ShellExecuteW(
+        owner,
+        L"open",
+        editor.c_str(),
+        parameters.c_str(),
+        nullptr,
+        SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
 ReportFormat SelectedFormat(HWND combo) {
     const LRESULT selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
     if (selected == 1) {
@@ -308,6 +586,8 @@ void SetRunningState(AppState& state, bool running) {
     EnableWindow(state.startButton, running ? FALSE : TRUE);
     EnableWindow(state.stopButton, running ? TRUE : FALSE);
     EnableWindow(state.exportButton, (!running && !state.records.empty()) ? TRUE : FALSE);
+    EnableWindow(state.editJsonButton, TRUE);
+    EnableWindow(state.saveOverridesButton, (!running && HasManualEdits(state)) ? TRUE : FALSE);
     EnableWindow(state.cleanVst2DuplicatesButton, (!running && !state.records.empty()) ? TRUE : FALSE);
     EnableWindow(state.cleanClapButton, (!running && !state.records.empty()) ? TRUE : FALSE);
     EnableWindow(state.cleanAaxButton, (!running && !state.records.empty()) ? TRUE : FALSE);
@@ -343,17 +623,21 @@ void LayoutControls(HWND window, AppState& state) {
     const int outputY = 196;
     MoveWindow(state.formatCombo, editX, outputY, 160, 120, TRUE);
     const int outputLabelX = editX + 180;
-    MoveWindow(GetDlgItem(window, IDC_OUTPUT_FILE), outputLabelX + 100, outputY, std::max(160, browseX - outputLabelX - 110), 24, TRUE);
+    const int editJsonWidth = 90;
+    const int editJsonX = browseX - editJsonWidth - 10;
+    MoveWindow(GetDlgItem(window, IDC_OUTPUT_FILE), outputLabelX + 100, outputY, std::max(160, editJsonX - outputLabelX - 110), 24, TRUE);
+    MoveWindow(state.editJsonButton, editJsonX, outputY - 1, editJsonWidth, rowHeight, TRUE);
     MoveWindow(GetDlgItem(window, IDC_BROWSE_OUTPUT), browseX, outputY - 1, browseWidth, rowHeight, TRUE);
 
     const int actionY = 236;
     MoveWindow(state.startButton, margin, actionY, 110, 32, TRUE);
     MoveWindow(state.stopButton, margin + 120, actionY, 110, 32, TRUE);
     MoveWindow(state.exportButton, margin + 240, actionY, 110, 32, TRUE);
-    MoveWindow(state.cleanVst2DuplicatesButton, margin + 360, actionY, 120, 32, TRUE);
-    MoveWindow(state.cleanClapButton, margin + 490, actionY, 95, 32, TRUE);
-    MoveWindow(state.cleanAaxButton, margin + 595, actionY, 95, 32, TRUE);
-    MoveWindow(state.progress, margin + 700, actionY + 5, std::max(120, width - margin * 2 - 700), 22, TRUE);
+    MoveWindow(state.saveOverridesButton, margin + 360, actionY, 145, 32, TRUE);
+    MoveWindow(state.cleanVst2DuplicatesButton, margin + 515, actionY, 120, 32, TRUE);
+    MoveWindow(state.cleanClapButton, margin + 645, actionY, 85, 32, TRUE);
+    MoveWindow(state.cleanAaxButton, margin + 740, actionY, 85, 32, TRUE);
+    MoveWindow(state.progress, margin + 835, actionY + 5, std::max(0, width - margin * 2 - 835), 22, TRUE);
     MoveWindow(state.summaryLabel, margin, 276, width - margin * 2, 24, TRUE);
     MoveWindow(state.status, margin, 300, width - margin * 2, 24, TRUE);
 
@@ -381,12 +665,14 @@ void StartScan(AppState& state) {
     };
 
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
+    FinishInlineEdit(state, false);
     ListView_DeleteAllItems(state.results);
     state.records.clear();
     state.summary = ScanSummary{};
     state.sortColumn = -1;
     UpdateSummaryLabel(state);
     EnableWindow(state.exportButton, FALSE);
+    EnableWindow(state.saveOverridesButton, FALSE);
     SetWindowTextW(state.status, L"Scan startet...");
     SetWindowTextW(state.log, L"");
     state.stopRequested.store(false);
@@ -420,6 +706,7 @@ void ExportResults(AppState& state) {
     if (state.running || state.records.empty()) {
         return;
     }
+    FinishInlineEdit(state, true);
 
     const ReportFormat format = SelectedFormat(state.formatCombo);
     const std::wstring outputPath = EnsureOutputExtension(
@@ -436,6 +723,80 @@ void ExportResults(AppState& state) {
         SetWindowTextW(state.status, L"Export fehlgeschlagen.");
         AppendLog(state.log, L"Fehler: " + error);
         MessageBoxW(state.window, error.c_str(), L"Export fehlgeschlagen", MB_OK | MB_ICONERROR);
+    }
+}
+
+void EditJsonRules(AppState& state) {
+    std::filesystem::path jsonPath = FindJsonRulesFile();
+    bool created = false;
+
+    if (jsonPath.empty()) {
+        const int answer = MessageBoxW(
+            state.window,
+            L"plugin_rules_userprefs.json wurde nicht gefunden. Neue Vorlage erstellen?",
+            L"JSON bearbeiten",
+            MB_YESNO | MB_ICONQUESTION);
+        if (answer != IDYES) {
+            return;
+        }
+
+        jsonPath = CreateJsonTemplateFile();
+        if (jsonPath.empty()) {
+            SetWindowTextW(state.status, L"JSON-Vorlage konnte nicht erstellt werden.");
+            AppendLog(state.log, L"editor launch failed: plugin_rules_userprefs.json konnte nicht erstellt werden");
+            return;
+        }
+        created = true;
+        AppendLog(state.log, L"plugin_rules_userprefs.json created: " + jsonPath.wstring());
+    }
+
+    const std::filesystem::path editor = FindEditorExecutable();
+    if (LaunchEditor(editor, jsonPath, state.window) ||
+        (ToLower(editor.filename().wstring()) != L"notepad.exe" &&
+         LaunchEditor(L"notepad.exe", jsonPath, state.window))) {
+        SetWindowTextW(state.status, created ? L"JSON-Vorlage erstellt und geoeffnet." : L"JSON-Datei geoeffnet.");
+        AppendLog(state.log, L"plugin_rules_userprefs.json opened: " + jsonPath.wstring());
+        return;
+    }
+
+    SetWindowTextW(state.status, L"Editor konnte nicht gestartet werden.");
+    AppendLog(state.log, L"editor launch failed: " + jsonPath.wstring());
+}
+
+std::filesystem::path JsonRulesSavePath() {
+    std::filesystem::path jsonPath = FindJsonRulesFile();
+    if (!jsonPath.empty()) {
+        return jsonPath;
+    }
+
+    const auto candidates = JsonRuleCandidates();
+    if (!candidates.empty()) {
+        return candidates.front();
+    }
+    return std::filesystem::path(L"plugin_rules_userprefs.json");
+}
+
+void SaveOverrides(AppState& state) {
+    FinishInlineEdit(state, true);
+    if (!HasManualEdits(state)) {
+        SetWindowTextW(state.status, L"Keine manuellen Overrides zu speichern.");
+        AppendLog(state.log, L"Keine manuellen Overrides zu speichern.");
+        return;
+    }
+
+    const std::filesystem::path jsonPath = JsonRulesSavePath();
+    const SaveManualOverridesResult result = SaveManualOverrides(jsonPath, state.records);
+    if (!result.success) {
+        SetWindowTextW(state.status, L"Overrides konnten nicht gespeichert werden.");
+        AppendLog(state.log, L"Overrides speichern fehlgeschlagen: " + result.errorMessage);
+        MessageBoxW(state.window, result.errorMessage.c_str(), L"Overrides speichern", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    SetWindowTextW(state.status, L"Overrides gespeichert.");
+    AppendLog(state.log, L"Overrides gespeichert: " + jsonPath.wstring());
+    if (!result.backupPath.empty()) {
+        AppendLog(state.log, L"Backup: " + result.backupPath.wstring());
     }
 }
 
@@ -598,17 +959,20 @@ void CreateMainControls(HWND window, AppState& state) {
 
     CreateLabel(window, L"Ausgabedatei", 310, 200, 100, 22);
     CreateEdit(window, IDC_OUTPUT_FILE, L"vst_plugin_report.html", 410, 196, 320, 24);
+    state.editJsonButton = CreateButton(window, IDC_EDIT_JSON, L"Edit JSON", 640, 195, 90, 26);
     CreateButton(window, IDC_BROWSE_OUTPUT, L"Browse", 740, 195, 90, 26);
     state.summaryLabel = CreateLabel(window, L"VST2: 0 | VST3: 0 | CLAP: 0 | AAX: 0 | Dubletten-Gruppen: 0 | Eintraege: 0 | VST2 loeschbar: 0", 16, 276, 760, 22);
 
     state.startButton = CreateButton(window, IDC_START, L"Start Scan", 16, 236, 110, 32);
     state.stopButton = CreateButton(window, IDC_STOP, L"Stop Scan", 136, 236, 110, 32);
     state.exportButton = CreateButton(window, IDC_EXPORT, L"Export", 256, 236, 110, 32);
+    state.saveOverridesButton = CreateButton(window, IDC_SAVE_OVERRIDES, L"Overrides speichern", 376, 236, 145, 32);
     state.cleanVst2DuplicatesButton = CreateButton(window, IDC_CLEAN_VST2_DUP, L"Del VST2 Dup", 376, 236, 120, 32);
     state.cleanClapButton = CreateButton(window, IDC_CLEAN_CLAP, L"Del CLAP", 506, 236, 95, 32);
     state.cleanAaxButton = CreateButton(window, IDC_CLEAN_AAX, L"Del AAX", 611, 236, 95, 32);
     EnableWindow(state.stopButton, FALSE);
     EnableWindow(state.exportButton, FALSE);
+    EnableWindow(state.saveOverridesButton, FALSE);
     EnableWindow(state.cleanVst2DuplicatesButton, FALSE);
     EnableWindow(state.cleanClapButton, FALSE);
     EnableWindow(state.cleanAaxButton, FALSE);
@@ -668,6 +1032,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case IDC_EXPORT:
             ExportResults(*state);
+            return 0;
+        case IDC_EDIT_JSON:
+            EditJsonRules(*state);
+            return 0;
+        case IDC_SAVE_OVERRIDES:
+            SaveOverrides(*state);
             return 0;
         case IDC_CLEAN_VST2_DUP:
             DeleteVst2Duplicates(*state);
@@ -749,8 +1119,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (state) {
             auto* header = reinterpret_cast<NMHDR*>(lParam);
             if (header && header->idFrom == IDC_RESULTS && header->code == LVN_COLUMNCLICK) {
+                FinishInlineEdit(*state, true);
                 auto* listInfo = reinterpret_cast<NMLISTVIEW*>(lParam);
                 SortRecords(*state, listInfo->iSubItem);
+                return 0;
+            }
+            if (header && header->idFrom == IDC_RESULTS && header->code == NM_DBLCLK) {
+                auto* itemInfo = reinterpret_cast<NMITEMACTIVATE*>(lParam);
+                StartInlineEdit(*state, itemInfo->iItem, itemInfo->iSubItem);
                 return 0;
             }
         }
@@ -803,6 +1179,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         return 0;
     case WM_CLOSE:
+        if (state) {
+            FinishInlineEdit(*state, true);
+        }
         if (state && state->running) {
             state->stopRequested.store(true);
             MessageBoxW(window, L"Ein Scan laeuft noch. Bitte kurz warten, bis der Worker beendet ist.", L"Scan laeuft", MB_OK | MB_ICONINFORMATION);
@@ -851,7 +1230,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     HWND window = CreateWindowExW(
         0,
         className,
-        L"Windows VST Plugin Scanner 1.0.0.0",
+        L"Windows VST Plugin Scanner 1.0.1.0",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,

@@ -21,6 +21,9 @@
     <ClInclude Include="include\PluginRecord.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\PluginUserPrefs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\ReportWriter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -41,6 +44,9 @@
     <ClCompile Include="src\MetadataReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\PluginUserPrefs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\ReportWriter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -58,5 +64,10 @@
     <ResourceCompile Include="VstPluginScanner.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="plugin_rules_userprefs.json">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

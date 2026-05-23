@@ -130,6 +130,28 @@ std::wstring FormatFileTime(const std::filesystem::file_time_type& value) {
     return stream.str();
 }
 
+std::wstring FormatFileSize(std::uintmax_t bytes) {
+    constexpr double base = 1024.0;
+    if (bytes < 1024) {
+        return std::to_wstring(bytes) + L" B";
+    }
+
+    const double kb = static_cast<double>(bytes) / base;
+    const double mb = kb / base;
+    const double gb = mb / base;
+
+    std::wstringstream stream;
+    stream << std::fixed << std::setprecision(1);
+    if (kb < 1024.0) {
+        stream << kb << L" KB";
+    } else if (mb < 1024.0) {
+        stream << mb << L" MB";
+    } else {
+        stream << gb << L" GB";
+    }
+    return stream.str();
+}
+
 std::wstring CurrentTimestamp() {
     const auto now = std::chrono::system_clock::now();
     const std::time_t time = std::chrono::system_clock::to_time_t(now);
