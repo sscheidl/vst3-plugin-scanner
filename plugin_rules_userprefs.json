@@ -1090,7 +1090,7 @@
       "notes": ""
     },
     {
-      "pluginName": "ColourCopy(x64)",
+      "pluginName": "ColourCopy",
       "match": [
         "colourcopy(x64)"
       ],
@@ -1462,7 +1462,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Diva(x64)",
+      "pluginName": "Diva",
       "match": [
         "diva(x64)"
       ],
@@ -2000,7 +2000,7 @@
       "match": [
         "flechtwerk"
       ],
-      "vendor": "Unknown",
+      "vendor": "Ternär Music Technology",
       "category": "FX Plugin",
       "confidence": "medium",
       "vendorConfidence": "medium",
@@ -2252,7 +2252,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Hive(x64)",
+      "pluginName": "Hive 2",
       "match": [
         "hive(x64)"
       ],
@@ -2417,7 +2417,7 @@
       "notes": ""
     },
     {
-      "pluginName": "K1v_x64",
+      "pluginName": "K1v",
       "match": [
         "k1v_x64"
       ],
@@ -4310,7 +4310,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Presswerk(x64)",
+      "pluginName": "Presswerk",
       "match": [
         "presswerk(x64)"
       ],
@@ -4505,7 +4505,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Repro-1(x64)",
+      "pluginName": "Repro-1",
       "match": [
         "repro-1(x64)"
       ],
@@ -4795,7 +4795,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Satin(x64)",
+      "pluginName": "Satin",
       "match": [
         "satin(x64)"
       ],
@@ -5717,7 +5717,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Twangstrom(x64)",
+      "pluginName": "Twangstrom",
       "match": [
         "twangstrom(x64)"
       ],
@@ -6533,7 +6533,7 @@
       "notes": ""
     },
     {
-      "pluginName": "Zebra2(x64)",
+      "pluginName": "Zebra 2",
       "match": [
         "zebra2(x64)"
       ],
@@ -6563,7 +6563,7 @@
       "notes": ""
     },
     {
-      "pluginName": "ZebraHZ(x64)",
+      "pluginName": "Zebra HZ",
       "match": [
         "zebrahz(x64)"
       ],
@@ -7448,7 +7448,7 @@
       "notes": ""
     },
     {
-      "pluginName": "smartreverb_x64",
+      "pluginName": "smartreverb",
       "match": [
         "smartreverb_x64"
       ],
