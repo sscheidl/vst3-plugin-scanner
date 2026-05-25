@@ -36,6 +36,7 @@ struct PluginRecord {
     bool metadataFromJson = false;
     bool metadataFromManualOverrides = false;
     bool manuallyEdited = false;
+    bool versionManuallyEdited = false;
 };
 
 struct ScanSummary {

@@ -60,7 +60,7 @@ constexpr int IDC_INLINE_EDIT = 1027;
 constexpr UINT IDM_OPEN_IN_EXPLORER = 40001;
 constexpr UINT IDM_DELETE_SELECTED = 40002;
 
-constexpr wchar_t APP_VERSION[] = L"1.0.1.0";
+constexpr wchar_t APP_VERSION[] = L"1.0.2.0";
 
 constexpr UINT WM_SCAN_PROGRESS = WM_APP + 1;
 constexpr UINT WM_SCAN_LOG = WM_APP + 2;
@@ -154,7 +154,7 @@ bool HasManualEdits(const AppState& state) {
 }
 
 bool IsEditableColumn(int column) {
-    return column == 1 || column == 2 || column == 3;
+    return column == 1 || column == 2 || column == 3 || column == 4;
 }
 
 void InsertColumn(HWND list, int index, const wchar_t* title, int width) {
@@ -284,6 +284,8 @@ void UpdateEditedRecordField(PluginRecord& record, int column, const std::wstrin
         record.pluginName = value;
     } else if (column == 3) {
         record.category = value;
+    } else if (column == 4) {
+        record.version = value;
     }
 }
 
@@ -296,6 +298,9 @@ std::wstring EditedRecordField(const PluginRecord& record, int column) {
     }
     if (column == 3) {
         return record.category;
+    }
+    if (column == 4) {
+        return record.version;
     }
     return {};
 }
@@ -319,16 +324,23 @@ void FinishInlineEdit(AppState& state, bool commit) {
         IsEditableColumn(column)) {
         const std::wstring value = Trim(GetWindowTextString(edit));
         PluginRecord& record = state.records[static_cast<std::size_t>(row)];
-        UpdateEditedRecordField(record, column, value);
-        record.manuallyEdited = true;
-        record.metadataFromManualOverrides = false;
+        const std::wstring oldValue = EditedRecordField(record, column);
+        if (value != oldValue) {
+            UpdateEditedRecordField(record, column, value);
+            record.manuallyEdited = true;
+            if (column == 4) {
+                record.versionManuallyEdited = true;
+            }
+            record.metadataFromManualOverrides = false;
 
-        SetListText(state.results, row, 1, record.manufacturer);
-        SetListText(state.results, row, 2, record.pluginName);
-        SetListText(state.results, row, 3, record.category);
-        SetListText(state.results, row, 7, ToDisplayText(record));
-        EnableWindow(state.saveOverridesButton, TRUE);
-        SetWindowTextW(state.status, L"Manuelle Aenderung uebernommen.");
+            SetListText(state.results, row, 1, record.manufacturer);
+            SetListText(state.results, row, 2, record.pluginName);
+            SetListText(state.results, row, 3, record.category);
+            SetListText(state.results, row, 4, record.version);
+            SetListText(state.results, row, 7, ToDisplayText(record));
+            EnableWindow(state.saveOverridesButton, TRUE);
+            SetWindowTextW(state.status, L"Manuelle Aenderung uebernommen.");
+        }
     }
 
     RemoveWindowSubclass(edit, InlineEditProc, 1);
@@ -1230,7 +1242,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     HWND window = CreateWindowExW(
         0,
         className,
-        L"Windows VST Plugin Scanner 1.0.1.0",
+        L"Windows VST Plugin Scanner 1.0.2.0",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,

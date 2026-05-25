@@ -269,6 +269,7 @@ struct PluginRule {
     std::wstring pluginName;
     std::wstring vendor;
     std::wstring category;
+    std::wstring version;
     std::vector<std::wstring> matchTokens;
     std::vector<std::wstring> typesSeen;
 };
@@ -462,6 +463,7 @@ void AddPluginRule(const JsonValue& item, UserPrefs& prefs) {
     rule.pluginName = GetStringMember(item, L"pluginName");
     rule.vendor = GetStringMember(item, L"vendor");
     rule.category = GetStringMember(item, L"category");
+    rule.version = GetStringMember(item, L"version");
     rule.matchTokens = GetStringArrayMember(item, L"match");
     rule.typesSeen = GetStringArrayMember(item, L"typesSeen");
     if (rule.matchTokens.empty() && !rule.pluginName.empty()) {
@@ -665,6 +667,7 @@ bool ApplyPrefsToRecord(const UserPrefs& prefs, PluginRecord& record) {
             changedByJson = AssignIfChanged(record.manufacturer, pluginRule->vendor) || changedByJson;
         }
         changedByJson = AssignIfChanged(record.category, pluginRule->category) || changedByJson;
+        changedByJson = AssignIfChanged(record.version, pluginRule->version) || changedByJson;
     } else if (Trim(record.manufacturer).empty() || IsBlacklistedManufacturer(record.manufacturer)) {
         if (const VendorRule* vendorRule = FindBestVendorRule(prefs, record);
             vendorRule && !IsBlacklistedManufacturer(vendorRule->vendor)) {
@@ -724,39 +727,266 @@ std::wstring JsonEscape(const std::wstring& value) {
     return result;
 }
 
-ManualOverride ManualOverrideFromRecord(const PluginRecord& record) {
-    ManualOverride overrideRule;
-    overrideRule.fileName = record.fileName;
-    overrideRule.type = ToDisplayText(record.pluginType);
-    overrideRule.pathContains = record.filePath;
-    overrideRule.manufacturer = record.manufacturer;
-    overrideRule.pluginName = record.pluginName;
-    overrideRule.category = record.category;
-    overrideRule.notes = L"Created from manual edit in VST Plugin Scanner";
-    return overrideRule;
+JsonValue MakeJsonString(const std::wstring& value) {
+    JsonValue json;
+    json.type = JsonValue::Type::String;
+    json.stringValue = value;
+    return json;
 }
 
-std::wstring ManualOverridesJson(const std::vector<ManualOverride>& overrides) {
+JsonValue MakeJsonStringArray(const std::vector<std::wstring>& values) {
+    JsonValue json;
+    json.type = JsonValue::Type::Array;
+    for (const auto& value : values) {
+        json.arrayValue.push_back(MakeJsonString(value));
+    }
+    return json;
+}
+
+bool HasObjectMember(const JsonValue& object, const std::wstring& key) {
+    return object.type == JsonValue::Type::Object &&
+        object.objectValue.find(key) != object.objectValue.end();
+}
+
+void SetObjectString(JsonValue& object, const std::wstring& key, const std::wstring& value) {
+    object.type = JsonValue::Type::Object;
+    object.objectValue[key] = MakeJsonString(value);
+}
+
+void SetObjectStringArray(JsonValue& object, const std::wstring& key, const std::vector<std::wstring>& values) {
+    object.type = JsonValue::Type::Object;
+    object.objectValue[key] = MakeJsonStringArray(values);
+}
+
+std::wstring JsonIndent(int level) {
+    return std::wstring(static_cast<std::size_t>(level * 2), L' ');
+}
+
+std::wstring JsonValueToText(const JsonValue& value, int indentLevel);
+
+std::wstring JsonArrayToText(const JsonValue& value, int indentLevel) {
+    if (value.arrayValue.empty()) {
+        return L"[]";
+    }
+
     std::wstringstream stream;
     stream << L"[\r\n";
-    for (std::size_t i = 0; i < overrides.size(); ++i) {
-        const auto& overrideRule = overrides[i];
-        stream << L"    {\r\n";
-        stream << L"      \"match\": {\r\n";
-        stream << L"        \"fileName\": \"" << JsonEscape(overrideRule.fileName) << L"\",\r\n";
-        stream << L"        \"type\": \"" << JsonEscape(overrideRule.type) << L"\",\r\n";
-        stream << L"        \"pathContains\": \"" << JsonEscape(overrideRule.pathContains) << L"\"\r\n";
-        stream << L"      },\r\n";
-        stream << L"      \"set\": {\r\n";
-        stream << L"        \"manufacturer\": \"" << JsonEscape(overrideRule.manufacturer) << L"\",\r\n";
-        stream << L"        \"pluginName\": \"" << JsonEscape(overrideRule.pluginName) << L"\",\r\n";
-        stream << L"        \"category\": \"" << JsonEscape(overrideRule.category) << L"\"\r\n";
-        stream << L"      },\r\n";
-        stream << L"      \"notes\": \"" << JsonEscape(overrideRule.notes.empty() ? L"Created from manual edit in VST Plugin Scanner" : overrideRule.notes) << L"\"\r\n";
-        stream << L"    }" << (i + 1 < overrides.size() ? L"," : L"") << L"\r\n";
+    for (std::size_t i = 0; i < value.arrayValue.size(); ++i) {
+        stream << JsonIndent(indentLevel + 1)
+               << JsonValueToText(value.arrayValue[i], indentLevel + 1)
+               << (i + 1 < value.arrayValue.size() ? L"," : L"")
+               << L"\r\n";
+    }
+    stream << JsonIndent(indentLevel) << L"]";
+    return stream.str();
+}
+
+std::wstring JsonObjectToText(const JsonValue& value, int indentLevel) {
+    if (value.objectValue.empty()) {
+        return L"{}";
+    }
+
+    std::wstringstream stream;
+    stream << L"{\r\n";
+    std::size_t index = 0;
+    for (const auto& [key, child] : value.objectValue) {
+        stream << JsonIndent(indentLevel + 1)
+               << L"\"" << JsonEscape(key) << L"\": "
+               << JsonValueToText(child, indentLevel + 1)
+               << (++index < value.objectValue.size() ? L"," : L"")
+               << L"\r\n";
+    }
+    stream << JsonIndent(indentLevel) << L"}";
+    return stream.str();
+}
+
+std::wstring JsonValueToText(const JsonValue& value, int indentLevel) {
+    switch (value.type) {
+    case JsonValue::Type::String:
+        return L"\"" + JsonEscape(value.stringValue) + L"\"";
+    case JsonValue::Type::Array:
+        return JsonArrayToText(value, indentLevel);
+    case JsonValue::Type::Object:
+        return JsonObjectToText(value, indentLevel);
+    case JsonValue::Type::Null:
+    default:
+        return L"null";
+    }
+}
+
+std::vector<std::wstring> PluginRuleKeysInWriteOrder(const JsonValue& rule) {
+    std::vector<std::wstring> keys;
+    const std::vector<std::wstring> preferred = {
+        L"pluginName",
+        L"match",
+        L"vendor",
+        L"category",
+        L"version",
+        L"typesSeen",
+    };
+
+    for (const auto& key : preferred) {
+        if (HasObjectMember(rule, key)) {
+            keys.push_back(key);
+        }
+    }
+    if (rule.type == JsonValue::Type::Object) {
+        for (const auto& [key, _] : rule.objectValue) {
+            if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+                keys.push_back(key);
+            }
+        }
+    }
+    return keys;
+}
+
+std::wstring PluginRuleJson(const JsonValue& rule, int indentLevel) {
+    if (rule.type != JsonValue::Type::Object) {
+        return JsonValueToText(rule, indentLevel);
+    }
+
+    const std::vector<std::wstring> keys = PluginRuleKeysInWriteOrder(rule);
+    if (keys.empty()) {
+        return L"{}";
+    }
+
+    std::wstringstream stream;
+    stream << L"{\r\n";
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        const auto it = rule.objectValue.find(keys[i]);
+        if (it == rule.objectValue.end()) {
+            continue;
+        }
+        stream << JsonIndent(indentLevel + 1)
+               << L"\"" << JsonEscape(keys[i]) << L"\": "
+               << JsonValueToText(it->second, indentLevel + 1)
+               << (i + 1 < keys.size() ? L"," : L"")
+               << L"\r\n";
+    }
+    stream << JsonIndent(indentLevel) << L"}";
+    return stream.str();
+}
+
+std::wstring PluginRulesJson(const std::vector<JsonValue>& rules) {
+    if (rules.empty()) {
+        return L"[]";
+    }
+
+    std::wstringstream stream;
+    stream << L"[\r\n";
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        stream << L"    " << PluginRuleJson(rules[i], 2)
+               << (i + 1 < rules.size() ? L"," : L"")
+               << L"\r\n";
     }
     stream << L"  ]";
     return stream.str();
+}
+
+bool StringVectorContainsNormalized(const std::vector<std::wstring>& values, const std::wstring& value) {
+    const std::wstring normalized = ToLower(Trim(value));
+    return std::any_of(values.begin(), values.end(), [&](const std::wstring& candidate) {
+        return ToLower(Trim(candidate)) == normalized;
+    });
+}
+
+std::wstring PreferredPluginRuleMatchToken(const PluginRecord& record) {
+    std::wstring token = StemWithoutPluginExtension(record.fileName);
+    if (Trim(token).empty()) {
+        token = record.pluginName;
+    }
+    return Trim(token);
+}
+
+bool JsonPluginRuleTypeMatchesRecord(const JsonValue& rule, PluginType type) {
+    const std::vector<std::wstring> typesSeen = GetStringArrayMember(rule, L"typesSeen");
+    if (typesSeen.empty()) {
+        return true;
+    }
+    return StringVectorContainsNormalized(typesSeen, ToDisplayText(type));
+}
+
+int FindPluginRuleIndexForRecord(const std::vector<JsonValue>& rules, const PluginRecord& record) {
+    const std::vector<std::wstring> haystacks = MatchHaystacks(record);
+    int bestIndex = -1;
+    std::size_t bestTokenLength = 0;
+
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        const JsonValue& rule = rules[i];
+        if (rule.type != JsonValue::Type::Object || !JsonPluginRuleTypeMatchesRecord(rule, record.pluginType)) {
+            continue;
+        }
+
+        std::vector<std::wstring> tokens = GetStringArrayMember(rule, L"match");
+        const std::wstring pluginName = GetStringMember(rule, L"pluginName");
+        if (tokens.empty() && !pluginName.empty()) {
+            tokens.push_back(pluginName);
+        }
+
+        for (const auto& token : tokens) {
+            const std::wstring normalizedToken = NormalizeMatchToken(token);
+            if (normalizedToken.size() < bestTokenLength) {
+                continue;
+            }
+            if (TokenMatchesRecord(token, haystacks)) {
+                bestIndex = static_cast<int>(i);
+                bestTokenLength = normalizedToken.size();
+            }
+        }
+    }
+
+    return bestIndex;
+}
+
+void EnsurePluginRuleMatchToken(JsonValue& rule, const std::wstring& token) {
+    if (Trim(token).empty()) {
+        return;
+    }
+
+    std::vector<std::wstring> tokens = GetStringArrayMember(rule, L"match");
+    const std::wstring normalizedToken = NormalizeMatchToken(token);
+    const bool exists = std::any_of(tokens.begin(), tokens.end(), [&](const std::wstring& candidate) {
+        return NormalizeMatchToken(candidate) == normalizedToken;
+    });
+    if (!exists) {
+        tokens.push_back(token);
+        SetObjectStringArray(rule, L"match", tokens);
+    } else if (!HasObjectMember(rule, L"match")) {
+        SetObjectStringArray(rule, L"match", tokens);
+    }
+}
+
+void EnsurePluginRuleTypeSeen(JsonValue& rule, const std::wstring& type) {
+    std::vector<std::wstring> typesSeen = GetStringArrayMember(rule, L"typesSeen");
+    if (!StringVectorContainsNormalized(typesSeen, type)) {
+        typesSeen.push_back(type);
+    }
+    SetObjectStringArray(rule, L"typesSeen", typesSeen);
+}
+
+void UpdatePluginRuleFromRecord(JsonValue& rule, const PluginRecord& record) {
+    SetObjectString(rule, L"pluginName", record.pluginName);
+    SetObjectString(rule, L"vendor", record.manufacturer);
+    SetObjectString(rule, L"category", record.category);
+    EnsurePluginRuleMatchToken(rule, PreferredPluginRuleMatchToken(record));
+    EnsurePluginRuleTypeSeen(rule, ToDisplayText(record.pluginType));
+    if (record.versionManuallyEdited || HasObjectMember(rule, L"version")) {
+        SetObjectString(rule, L"version", record.version);
+    }
+}
+
+JsonValue NewPluginRuleFromRecord(const PluginRecord& record) {
+    JsonValue rule;
+    rule.type = JsonValue::Type::Object;
+    SetObjectString(rule, L"pluginName", record.pluginName);
+    SetObjectStringArray(rule, L"match", { PreferredPluginRuleMatchToken(record) });
+    SetObjectString(rule, L"vendor", record.manufacturer);
+    SetObjectString(rule, L"category", record.category);
+    if (record.versionManuallyEdited) {
+        SetObjectString(rule, L"version", record.version);
+    }
+    SetObjectStringArray(rule, L"typesSeen", { ToDisplayText(record.pluginType) });
+    return rule;
 }
 
 bool WriteUtf8File(const std::filesystem::path& path, const std::wstring& content, std::wstring& errorMessage) {
@@ -1025,10 +1255,10 @@ PluginUserPrefsResult ApplyPluginUserPrefs(const std::filesystem::path& rulesPat
 SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rulesPath,
                                                const std::vector<PluginRecord>& records) {
     SaveManualOverridesResult result;
-    std::vector<ManualOverride> manualEdits;
+    std::vector<PluginRecord> manualEdits;
     for (const auto& record : records) {
         if (record.manuallyEdited) {
-            manualEdits.push_back(ManualOverrideFromRecord(record));
+            manualEdits.push_back(record);
         }
     }
 
@@ -1060,34 +1290,34 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
     JsonParser parser(text);
     std::wstring parseError;
     if (!parser.Parse(root, parseError) || root.type != JsonValue::Type::Object) {
-        result.errorMessage = L"plugin_rules_userprefs.json ist defekt. manualOverrides wurden nicht gespeichert. " + parseError;
+        result.errorMessage = L"plugin_rules_userprefs.json ist defekt. pluginRules wurden nicht gespeichert. " + parseError;
         return result;
     }
 
-    UserPrefs prefs;
-    LoadRulesArray(root, L"manualOverrides", prefs);
-    std::vector<ManualOverride> merged = prefs.manualOverrides;
+    std::vector<JsonValue> merged;
+    if (const JsonValue* pluginRules = FindMember(root, L"pluginRules");
+        pluginRules && pluginRules->type == JsonValue::Type::Array) {
+        merged = pluginRules->arrayValue;
+    }
+
     for (const auto& edit : manualEdits) {
-        const std::wstring key = ManualOverrideKey(edit);
-        auto existing = std::find_if(merged.begin(), merged.end(), [&](const ManualOverride& candidate) {
-            return ManualOverrideKey(candidate) == key;
-        });
-        if (existing == merged.end()) {
-            merged.push_back(edit);
+        const int existingIndex = FindPluginRuleIndexForRecord(merged, edit);
+        if (existingIndex < 0) {
+            merged.push_back(NewPluginRuleFromRecord(edit));
         } else {
-            *existing = edit;
+            UpdatePluginRuleFromRecord(merged[static_cast<std::size_t>(existingIndex)], edit);
         }
     }
 
-    const std::wstring manualOverridesProperty =
-        L"\"manualOverrides\": " + ManualOverridesJson(merged);
+    const std::wstring pluginRulesProperty =
+        L"\"pluginRules\": " + PluginRulesJson(merged);
 
     std::wstring updatedText;
     std::size_t propertyStart = 0;
     std::size_t propertyEnd = 0;
-    if (FindTopLevelMemberRange(text, L"manualOverrides", propertyStart, propertyEnd)) {
+    if (FindTopLevelMemberRange(text, L"pluginRules", propertyStart, propertyEnd)) {
         updatedText = text.substr(0, propertyStart) +
-            manualOverridesProperty +
+            pluginRulesProperty +
             text.substr(propertyEnd);
     } else {
         std::size_t insertAt = text.find_last_of(L'}');
@@ -1109,7 +1339,7 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
         if (hasExistingMembers) {
             updatedText += L",";
         }
-        updatedText += L"\r\n  " + manualOverridesProperty + L"\r\n";
+        updatedText += L"\r\n  " + pluginRulesProperty + L"\r\n";
         updatedText += text.substr(insertAt);
     }
 
