@@ -1,15 +1,24 @@
 #include "MetadataReader.h"
 
 #include "StringUtil.h"
+#include "VersionUtil.h"
 
 #include <Windows.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <fstream>
+#include <optional>
 #include <system_error>
 #include <vector>
 
 namespace {
+
+struct Translation {
+    WORD language;
+    WORD codePage;
+};
 
 std::wstring GetVersionString(void* data, WORD language, WORD codePage, const wchar_t* key) {
     std::wstring block = L"\\StringFileInfo\\";
@@ -24,8 +33,44 @@ std::wstring GetVersionString(void* data, WORD language, WORD codePage, const wc
     if (!VerQueryValueW(data, block.c_str(), &value, &size) || value == nullptr || size == 0) {
         return {};
     }
-    std::wstring raw(static_cast<wchar_t*>(value));
+    const auto* text = static_cast<const wchar_t*>(value);
+    std::wstring raw(text, text + size);
+    const std::size_t terminator = raw.find(L'\0');
+    if (terminator != std::wstring::npos) {
+        raw.resize(terminator);
+    }
     return Trim(raw);
+}
+
+void AddTranslation(std::vector<Translation>& translations, WORD language, WORD codePage) {
+    const auto exists = std::any_of(translations.begin(), translations.end(), [&](const Translation& item) {
+        return item.language == language && item.codePage == codePage;
+    });
+    if (!exists) {
+        translations.push_back({ language, codePage });
+    }
+}
+
+std::wstring GetVersionString(void* data,
+                              const std::vector<Translation>& translations,
+                              const wchar_t* key) {
+    for (const auto& translation : translations) {
+        const std::wstring value = GetVersionString(data, translation.language, translation.codePage, key);
+        if (!value.empty()) {
+            return value;
+        }
+    }
+    return {};
+}
+
+std::wstring FormatFixedVersion(DWORD mostSignificant, DWORD leastSignificant) {
+    if (mostSignificant == 0 && leastSignificant == 0) {
+        return {};
+    }
+    return std::to_wstring(HIWORD(mostSignificant)) + L"." +
+        std::to_wstring(LOWORD(mostSignificant)) + L"." +
+        std::to_wstring(HIWORD(leastSignificant)) + L"." +
+        std::to_wstring(LOWORD(leastSignificant));
 }
 
 bool IsJsonWhitespace(wchar_t c) {
@@ -116,40 +161,148 @@ bool ParseJsonStringAt(const std::wstring& text, std::size_t& index, std::wstrin
     return false;
 }
 
-std::wstring ExtractJsonString(const std::wstring& text, const std::wstring& key) {
-    std::size_t index = 0;
+void SkipJsonTrivia(const std::wstring& text, std::size_t& index) {
     while (index < text.size()) {
-        if (text[index] != L'"') {
+        SkipJsonWhitespace(text, index);
+        if (index + 1 >= text.size() || text[index] != L'/') {
+            return;
+        }
+        if (text[index + 1] == L'/') {
+            index += 2;
+            while (index < text.size() && text[index] != L'\n') {
+                ++index;
+            }
+            continue;
+        }
+        if (text[index + 1] == L'*') {
+            index += 2;
+            while (index + 1 < text.size() && !(text[index] == L'*' && text[index + 1] == L'/')) {
+                ++index;
+            }
+            if (index + 1 < text.size()) {
+                index += 2;
+            }
+            continue;
+        }
+        return;
+    }
+}
+
+std::optional<std::size_t> FindDirectMemberValue(const std::wstring& objectText,
+                                                  const std::wstring& key) {
+    int objectDepth = 0;
+    int arrayDepth = 0;
+    std::size_t index = 0;
+    while (index < objectText.size()) {
+        SkipJsonTrivia(objectText, index);
+        if (index >= objectText.size()) {
+            break;
+        }
+
+        const wchar_t c = objectText[index];
+        if (c == L'{') {
+            ++objectDepth;
+            ++index;
+            continue;
+        }
+        if (c == L'}') {
+            --objectDepth;
+            ++index;
+            continue;
+        }
+        if (c == L'[') {
+            ++arrayDepth;
+            ++index;
+            continue;
+        }
+        if (c == L']') {
+            --arrayDepth;
+            ++index;
+            continue;
+        }
+        if (c != L'"') {
             ++index;
             continue;
         }
 
-        std::size_t keyStart = index;
+        const int keyObjectDepth = objectDepth;
+        const int keyArrayDepth = arrayDepth;
         std::wstring parsedKey;
-        if (!ParseJsonStringAt(text, keyStart, parsedKey)) {
-            ++index;
+        if (!ParseJsonStringAt(objectText, index, parsedKey)) {
+            return std::nullopt;
+        }
+        if (keyObjectDepth != 1 || keyArrayDepth != 0) {
             continue;
         }
-        SkipJsonWhitespace(text, keyStart);
-        if (keyStart >= text.size() || text[keyStart] != L':') {
-            index = keyStart;
+
+        std::size_t valueStart = index;
+        SkipJsonTrivia(objectText, valueStart);
+        if (valueStart >= objectText.size() || objectText[valueStart] != L':') {
             continue;
         }
-        ++keyStart;
-        SkipJsonWhitespace(text, keyStart);
-        if (parsedKey == key && keyStart < text.size() && text[keyStart] == L'"') {
-            std::wstring parsedValue;
-            if (ParseJsonStringAt(text, keyStart, parsedValue)) {
-                return Trim(parsedValue);
+        ++valueStart;
+        SkipJsonTrivia(objectText, valueStart);
+        if (parsedKey == key) {
+            return valueStart;
+        }
+    }
+    return std::nullopt;
+}
+
+std::wstring ExtractDirectStringMember(const std::wstring& objectText,
+                                       const std::wstring& key) {
+    const auto valueStart = FindDirectMemberValue(objectText, key);
+    if (!valueStart || *valueStart >= objectText.size() || objectText[*valueStart] != L'"') {
+        return {};
+    }
+    std::size_t index = *valueStart;
+    std::wstring value;
+    return ParseJsonStringAt(objectText, index, value) ? Trim(value) : std::wstring{};
+}
+
+std::wstring ExtractDirectObjectMember(const std::wstring& objectText,
+                                       const std::wstring& key) {
+    const auto valueStart = FindDirectMemberValue(objectText, key);
+    if (!valueStart || *valueStart >= objectText.size() || objectText[*valueStart] != L'{') {
+        return {};
+    }
+
+    int depth = 0;
+    std::size_t index = *valueStart;
+    const std::size_t start = index;
+    while (index < objectText.size()) {
+        if (objectText[index] == L'"') {
+            std::wstring ignored;
+            if (!ParseJsonStringAt(objectText, index, ignored)) {
+                return {};
             }
-            return {};
+            continue;
         }
-        index = keyStart;
+        if (index + 1 < objectText.size() && objectText[index] == L'/' &&
+            (objectText[index + 1] == L'/' || objectText[index + 1] == L'*')) {
+            SkipJsonTrivia(objectText, index);
+            continue;
+        }
+        if (objectText[index] == L'{') {
+            ++depth;
+        } else if (objectText[index] == L'}') {
+            --depth;
+            if (depth == 0) {
+                return objectText.substr(start, index - start + 1);
+            }
+        }
+        ++index;
     }
     return {};
 }
 
 std::wstring ReadTextFileUtf8(const std::filesystem::path& path) {
+    constexpr std::uintmax_t maxMetadataFileSize = 4 * 1024 * 1024;
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > maxMetadataFileSize) {
+        return {};
+    }
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
         return {};
@@ -338,7 +491,45 @@ std::uintmax_t DirectorySize(const std::filesystem::path& path) {
     return total;
 }
 
+std::filesystem::path FindBinaryInDirectory(const std::filesystem::path& directory,
+                                            const std::wstring& extension,
+                                            const std::wstring& preferredStem) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(directory, ec) || ec) {
+        return {};
+    }
+
+    std::vector<std::filesystem::path> matches;
+    std::filesystem::directory_iterator iterator(
+        directory, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::directory_iterator end;
+    while (!ec && iterator != end) {
+        if (iterator->is_regular_file(ec) && !ec &&
+            ToLower(iterator->path().extension().wstring()) == extension) {
+            matches.push_back(iterator->path());
+        }
+        iterator.increment(ec);
+    }
+
+    std::sort(matches.begin(), matches.end(), [](const auto& left, const auto& right) {
+        return ToLower(left.wstring()) < ToLower(right.wstring());
+    });
+    const std::wstring normalizedStem = ToLower(preferredStem);
+    const auto preferred = std::find_if(matches.begin(), matches.end(), [&](const auto& path) {
+        return ToLower(path.stem().wstring()) == normalizedStem;
+    });
+    return preferred != matches.end() ? *preferred : (matches.empty() ? std::filesystem::path{} : matches.front());
+}
+
 } // namespace
+
+MetadataReader::MetadataReader()
+    : vst3SdkProbe_(CreateVst3SdkProbe()) {
+}
+
+MetadataReader::~MetadataReader() = default;
+MetadataReader::MetadataReader(MetadataReader&&) noexcept = default;
+MetadataReader& MetadataReader::operator=(MetadataReader&&) noexcept = default;
 
 PluginRecord MetadataReader::ReadPlugin(const std::filesystem::path& pluginPath, PluginType type) const {
     PluginRecord record;
@@ -372,44 +563,75 @@ PluginRecord MetadataReader::ReadPlugin(const std::filesystem::path& pluginPath,
         record.warningMessage = L"Aenderungsdatum konnte nicht gelesen werden: " + Utf8ToWide(ec.message());
     }
 
-    VersionInfo info;
+    Vst3SdkProbeResult sdkInfo;
+    VersionInfo moduleInfo;
     if (type == PluginType::Vst3) {
-        info = ReadVst3ModuleInfo(pluginPath);
+        if (vst3SdkProbe_ && vst3SdkProbe_->IsAvailable()) {
+            sdkInfo = vst3SdkProbe_->Probe(pluginPath, std::chrono::seconds(10));
+        }
+        moduleInfo = ReadVst3ModuleInfo(pluginPath);
+        record.metadataFromModuleInfo = !moduleInfo.productName.empty() ||
+            !moduleInfo.companyName.empty() || !moduleInfo.productVersion.empty();
     }
 
     const std::filesystem::path metadataBinary = ResolveMetadataBinary(pluginPath, type);
-    VersionInfo windowsInfo = ReadWindowsVersionInfo(metadataBinary);
+    const VersionInfo windowsInfo = ReadWindowsVersionInfo(metadataBinary);
 
-    if (info.productName.empty()) {
-        info.productName = windowsInfo.productName.empty() ? windowsInfo.fileDescription : windowsInfo.productName;
-    }
-    if (info.companyName.empty()) {
-        info.companyName = windowsInfo.companyName;
-    }
-    if (info.productVersion.empty()) {
-        info.productVersion = windowsInfo.productVersion.empty() ? windowsInfo.fileVersion : windowsInfo.productVersion;
-    }
+    const std::wstring productName = sdkInfo.succeeded && !sdkInfo.moduleName.empty()
+        ? sdkInfo.moduleName
+        : !moduleInfo.productName.empty()
+        ? moduleInfo.productName
+        : (!windowsInfo.productName.empty() ? windowsInfo.productName : windowsInfo.fileDescription);
+    const std::wstring companyName = sdkInfo.succeeded && !sdkInfo.vendor.empty()
+        ? sdkInfo.vendor
+        : !moduleInfo.companyName.empty()
+        ? moduleInfo.companyName
+        : windowsInfo.companyName;
 
-    if (!info.productName.empty()) {
-        record.pluginName = info.productName;
+    if (!productName.empty()) {
+        record.pluginName = productName;
     }
-    record.manufacturer = info.companyName;
+    record.manufacturer = companyName;
     if (Trim(record.manufacturer).empty()) {
         record.manufacturer = InferManufacturer(pluginPath, record.pluginName, record.fileName);
     }
-    record.version = info.productVersion;
-    record.category = InferPluginCategory(record.pluginName, record.fileName);
+
+    const auto assignVersion = [&](const std::wstring& value, VersionSource source) {
+        if (!record.version.empty() || Trim(value).empty()) {
+            return;
+        }
+        record.version = NormalizeVersionString(value);
+        if (!record.version.empty()) {
+            record.versionSource = source;
+        }
+    };
+    if (sdkInfo.succeeded) {
+        assignVersion(sdkInfo.version, VersionSource::Vst3SdkProbe);
+    }
+    assignVersion(moduleInfo.productVersion, VersionSource::Vst3ModuleInfo);
+    assignVersion(windowsInfo.productVersion, VersionSource::WindowsProductVersion);
+    assignVersion(windowsInfo.fileVersion, VersionSource::WindowsFileVersion);
+    assignVersion(windowsInfo.fixedProductVersion, VersionSource::WindowsFixedFileInfo);
+    assignVersion(windowsInfo.fixedFileVersion, VersionSource::WindowsFixedFileInfo);
+    assignVersion(ExtractVersionFromText(StemName(pluginPath)), VersionSource::FileName);
+
+    record.category = sdkInfo.succeeded && !Trim(sdkInfo.category).empty()
+        ? sdkInfo.category
+        : InferPluginCategory(record.pluginName, record.fileName);
 
     const bool hasName = !Trim(record.pluginName).empty();
     const bool hasManufacturer = !Trim(record.manufacturer).empty();
     const bool hasVersion = !Trim(record.version).empty();
+    const bool hasReliableVersion = hasVersion && record.versionSource != VersionSource::FileName;
 
-    if (hasName && hasManufacturer && hasVersion) {
+    if (hasName && hasManufacturer && hasReliableVersion) {
         record.status = ScanStatus::Recognized;
     } else if (hasName || hasManufacturer || hasVersion) {
         record.status = ScanStatus::PartiallyRecognized;
         if (record.warningMessage.empty()) {
-            record.warningMessage = L"Nicht alle Metadaten konnten zuverlaessig ermittelt werden.";
+            record.warningMessage = record.versionSource == VersionSource::FileName
+                ? L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt."
+                : L"Nicht alle Metadaten konnten zuverlaessig ermittelt werden.";
         }
     } else {
         record.status = ScanStatus::Unknown;
@@ -439,27 +661,36 @@ MetadataReader::VersionInfo MetadataReader::ReadWindowsVersionInfo(const std::fi
         return result;
     }
 
-    struct Translation {
-        WORD language;
-        WORD codePage;
-    };
-
     Translation* translations = nullptr;
     UINT translationSize = 0;
-    WORD language = 0x0409;
-    WORD codePage = 0x04B0;
+    std::vector<Translation> translationCandidates;
     if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
                        reinterpret_cast<LPVOID*>(&translations), &translationSize) &&
         translations != nullptr && translationSize >= sizeof(Translation)) {
-        language = translations[0].language;
-        codePage = translations[0].codePage;
+        const std::size_t count = translationSize / sizeof(Translation);
+        for (std::size_t i = 0; i < count; ++i) {
+            AddTranslation(translationCandidates, translations[i].language, translations[i].codePage);
+        }
     }
+    AddTranslation(translationCandidates, 0x0409, 0x04B0); // en-US, Unicode
+    AddTranslation(translationCandidates, 0x0000, 0x04B0); // language-neutral, Unicode
 
-    result.fileDescription = GetVersionString(data.data(), language, codePage, L"FileDescription");
-    result.productName = GetVersionString(data.data(), language, codePage, L"ProductName");
-    result.companyName = GetVersionString(data.data(), language, codePage, L"CompanyName");
-    result.fileVersion = GetVersionString(data.data(), language, codePage, L"FileVersion");
-    result.productVersion = GetVersionString(data.data(), language, codePage, L"ProductVersion");
+    result.fileDescription = GetVersionString(data.data(), translationCandidates, L"FileDescription");
+    result.productName = GetVersionString(data.data(), translationCandidates, L"ProductName");
+    result.companyName = GetVersionString(data.data(), translationCandidates, L"CompanyName");
+    result.fileVersion = GetVersionString(data.data(), translationCandidates, L"FileVersion");
+    result.productVersion = GetVersionString(data.data(), translationCandidates, L"ProductVersion");
+
+    VS_FIXEDFILEINFO* fixedInfo = nullptr;
+    UINT fixedInfoSize = 0;
+    if (VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&fixedInfo), &fixedInfoSize) &&
+        fixedInfo != nullptr && fixedInfoSize >= sizeof(VS_FIXEDFILEINFO) &&
+        fixedInfo->dwSignature == VS_FFI_SIGNATURE) {
+        result.fixedFileVersion = FormatFixedVersion(
+            fixedInfo->dwFileVersionMS, fixedInfo->dwFileVersionLS);
+        result.fixedProductVersion = FormatFixedVersion(
+            fixedInfo->dwProductVersionMS, fixedInfo->dwProductVersionLS);
+    }
     return result;
 }
 
@@ -485,9 +716,10 @@ MetadataReader::VersionInfo MetadataReader::ReadVst3ModuleInfo(const std::filesy
         if (text.empty()) {
             continue;
         }
-        result.productName = ExtractJsonString(text, L"Name");
-        result.companyName = ExtractJsonString(text, L"Vendor");
-        result.productVersion = ExtractJsonString(text, L"Version");
+        result.productName = ExtractDirectStringMember(text, L"Name");
+        result.productVersion = ExtractDirectStringMember(text, L"Version");
+        const std::wstring factoryInfo = ExtractDirectObjectMember(text, L"Factory Info");
+        result.companyName = ExtractDirectStringMember(factoryInfo, L"Vendor");
         return result;
     }
     return result;
@@ -522,28 +754,45 @@ std::filesystem::path MetadataReader::ResolveMetadataBinary(const std::filesyste
 
     if (type == PluginType::Vst3) {
         const std::filesystem::path contents = pluginPath / L"Contents";
-        if (std::filesystem::exists(contents, ec) && !ec) {
-            std::filesystem::recursive_directory_iterator iterator(
-                contents,
-                std::filesystem::directory_options::skip_permission_denied,
-                ec);
-            std::filesystem::recursive_directory_iterator end;
-            while (!ec && iterator != end) {
-                if (iterator->is_regular_file(ec) && !ec && ToLower(iterator->path().extension().wstring()) == L".vst3") {
-                    return iterator->path();
-                }
-                iterator.increment(ec);
-                if (ec) {
-                    ec.clear();
-                }
+        const std::wstring bundleStem = pluginPath.stem().wstring();
+        const std::array<const wchar_t*, 6> architectureDirectories = {
+            L"x86_64-win",
+            L"x64-win",
+            L"arm64ec-win",
+            L"arm64-win",
+            L"x86-win",
+            L"arm-win",
+        };
+        for (const wchar_t* architecture : architectureDirectories) {
+            const auto binary = FindBinaryInDirectory(contents / architecture, L".vst3", bundleStem);
+            if (!binary.empty()) {
+                return binary;
             }
         }
 
-        if (std::filesystem::exists(pluginPath, ec) && !ec) {
-            for (const auto& entry : std::filesystem::directory_iterator(pluginPath, std::filesystem::directory_options::skip_permission_denied, ec)) {
-                if (!ec && entry.is_regular_file() && ToLower(entry.path().extension().wstring()) == L".vst3") {
-                    return entry.path();
+        const auto directBinary = FindBinaryInDirectory(pluginPath, L".vst3", bundleStem);
+        if (!directBinary.empty()) {
+            return directBinary;
+        }
+
+        // Unknown future architectures are inspected only after all official layouts.
+        if (std::filesystem::exists(contents, ec) && !ec) {
+            std::vector<std::filesystem::path> fallbackBinaries;
+            std::filesystem::recursive_directory_iterator iterator(
+                contents, std::filesystem::directory_options::skip_permission_denied, ec);
+            const std::filesystem::recursive_directory_iterator end;
+            while (!ec && iterator != end) {
+                if (iterator->is_regular_file(ec) && !ec &&
+                    ToLower(iterator->path().extension().wstring()) == L".vst3") {
+                    fallbackBinaries.push_back(iterator->path());
                 }
+                iterator.increment(ec);
+            }
+            std::sort(fallbackBinaries.begin(), fallbackBinaries.end(), [](const auto& left, const auto& right) {
+                return ToLower(left.wstring()) < ToLower(right.wstring());
+            });
+            if (!fallbackBinaries.empty()) {
+                return fallbackBinaries.front();
             }
         }
         return pluginPath;

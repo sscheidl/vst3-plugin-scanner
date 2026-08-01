@@ -74,6 +74,8 @@
     <ClInclude Include="include\ReportWriter.h" />
     <ClInclude Include="include\ScannerEngine.h" />
     <ClInclude Include="include\StringUtil.h" />
+    <ClInclude Include="include\VersionUtil.h" />
+    <ClInclude Include="include\Vst3SdkProbe.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
@@ -83,6 +85,8 @@
     <ClCompile Include="src\ReportWriter.cpp" />
     <ClCompile Include="src\ScannerEngine.cpp" />
     <ClCompile Include="src\StringUtil.cpp" />
+    <ClCompile Include="src\VersionUtil.cpp" />
+    <ClCompile Include="src\Vst3SdkProbeStub.cpp" />
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>

@@ -1,6 +1,7 @@
 #include "PluginUserPrefs.h"
 
 #include "StringUtil.h"
+#include "VersionUtil.h"
 
 #include <Windows.h>
 
@@ -631,11 +632,20 @@ void RecomputeMetadataStatus(PluginRecord& record) {
     const bool hasName = !Trim(record.pluginName).empty();
     const bool hasManufacturer = !Trim(record.manufacturer).empty();
     const bool hasVersion = !Trim(record.version).empty();
+    const bool hasReliableVersion = hasVersion && record.versionSource != VersionSource::FileName;
 
-    if (hasName && hasManufacturer && hasVersion) {
+    if (hasName && hasManufacturer && hasReliableVersion) {
         record.status = ScanStatus::Recognized;
+        if (record.warningMessage == L"Nicht alle Metadaten konnten zuverlaessig ermittelt werden." ||
+            record.warningMessage == L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt." ||
+            record.warningMessage == L"Keine Windows-Versioninformationen gefunden.") {
+            record.warningMessage.clear();
+        }
     } else if (hasName || hasManufacturer || hasVersion) {
         record.status = ScanStatus::PartiallyRecognized;
+        if (record.versionSource == VersionSource::FileName && record.warningMessage.empty()) {
+            record.warningMessage = L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt.";
+        }
     } else {
         record.status = ScanStatus::Unknown;
     }
@@ -667,7 +677,11 @@ bool ApplyPrefsToRecord(const UserPrefs& prefs, PluginRecord& record) {
             changedByJson = AssignIfChanged(record.manufacturer, pluginRule->vendor) || changedByJson;
         }
         changedByJson = AssignIfChanged(record.category, pluginRule->category) || changedByJson;
-        changedByJson = AssignIfChanged(record.version, pluginRule->version) || changedByJson;
+        const bool versionChanged = AssignIfChanged(record.version, NormalizeVersionString(pluginRule->version));
+        if (versionChanged) {
+            record.versionSource = VersionSource::UserRule;
+        }
+        changedByJson = versionChanged || changedByJson;
     } else if (Trim(record.manufacturer).empty() || IsBlacklistedManufacturer(record.manufacturer)) {
         if (const VendorRule* vendorRule = FindBestVendorRule(prefs, record);
             vendorRule && !IsBlacklistedManufacturer(vendorRule->vendor)) {

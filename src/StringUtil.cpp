@@ -7,18 +7,25 @@
 #include <ctime>
 #include <cwctype>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) {
         return {};
     }
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return {};
+    }
+    const int inputSize = static_cast<int>(value.size());
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), inputSize, nullptr, 0, nullptr, nullptr);
     if (size <= 0) {
         return {};
     }
-    std::string result(static_cast<std::size_t>(size - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), size, nullptr, nullptr);
+    std::string result(static_cast<std::size_t>(size), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), inputSize, result.data(), size, nullptr, nullptr) != size) {
+        return {};
+    }
     return result;
 }
 
@@ -26,12 +33,18 @@ std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) {
         return {};
     }
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return {};
+    }
+    const int inputSize = static_cast<int>(value.size());
+    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), inputSize, nullptr, 0);
     if (size <= 0) {
         return {};
     }
-    std::wstring result(static_cast<std::size_t>(size - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), size);
+    std::wstring result(static_cast<std::size_t>(size), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), inputSize, result.data(), size) != size) {
+        return {};
+    }
     return result;
 }
 

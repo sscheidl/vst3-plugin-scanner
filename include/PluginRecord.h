@@ -19,11 +19,24 @@ enum class ScanStatus {
     AccessError
 };
 
+enum class VersionSource {
+    Unknown,
+    Vst3ModuleInfo,
+    Vst3SdkProbe,
+    WindowsProductVersion,
+    WindowsFileVersion,
+    WindowsFixedFileInfo,
+    FileName,
+    UserRule,
+    ManualEdit
+};
+
 struct PluginRecord {
     std::wstring manufacturer;
     std::wstring pluginName;
     std::wstring category;
     std::wstring version;
+    VersionSource versionSource = VersionSource::Unknown;
     PluginType pluginType = PluginType::Unknown;
     std::wstring filePath;
     std::wstring fileName;
@@ -33,6 +46,7 @@ struct PluginRecord {
     bool isPossibleDuplicate = false;
     ScanStatus status = ScanStatus::Unknown;
     std::wstring warningMessage;
+    bool metadataFromModuleInfo = false;
     bool metadataFromJson = false;
     bool metadataFromManualOverrides = false;
     bool manuallyEdited = false;
@@ -48,6 +62,9 @@ struct ScanSummary {
     std::size_t duplicateEntryCount = 0;
     std::size_t vst2DuplicateCandidateCount = 0;
     std::size_t warningCount = 0;
+    std::size_t versionDetectedCount = 0;
+    std::size_t versionHeuristicCount = 0;
+    std::size_t versionMissingCount = 0;
     std::vector<std::wstring> scannedPaths;
     std::wstring scanTimestamp;
 };
@@ -83,8 +100,35 @@ struct ScanSummary {
     }
 }
 
+[[nodiscard]] inline const wchar_t* ToDisplayText(VersionSource source) {
+    switch (source) {
+    case VersionSource::Vst3ModuleInfo:
+        return L"VST3 moduleinfo.json";
+    case VersionSource::Vst3SdkProbe:
+        return L"VST3 SDK-Probe";
+    case VersionSource::WindowsProductVersion:
+        return L"Windows ProductVersion";
+    case VersionSource::WindowsFileVersion:
+        return L"Windows FileVersion";
+    case VersionSource::WindowsFixedFileInfo:
+        return L"Windows FixedFileInfo";
+    case VersionSource::FileName:
+        return L"Dateiname (Heuristik)";
+    case VersionSource::UserRule:
+        return L"Benutzerregel";
+    case VersionSource::ManualEdit:
+        return L"Manuelle Eingabe";
+    case VersionSource::Unknown:
+    default:
+        return L"Unbekannt";
+    }
+}
+
 [[nodiscard]] inline std::wstring ToDisplayText(const PluginRecord& record) {
     std::wstring text = ToDisplayText(record.status);
+    if (record.metadataFromModuleInfo) {
+        text += L" | VST3 moduleinfo.json";
+    }
     if (record.metadataFromJson) {
         text += L" | Daten aus JSON";
     }

@@ -108,6 +108,9 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
     html << L"Dubletten-Gruppen: " << summary.duplicateCount << L"<br>";
     html << L"Dubletten-Eintraege: " << summary.duplicateEntryCount << L"<br>";
     html << L"VST2-Dubletten loeschbar: " << summary.vst2DuplicateCandidateCount << L"<br>";
+    html << L"Version zuverlaessig ermittelt: " << summary.versionDetectedCount << L"<br>";
+    html << L"Version heuristisch aus Dateiname: " << summary.versionHeuristicCount << L"<br>";
+    html << L"Version fehlt: " << summary.versionMissingCount << L"<br>";
     html << L"Fehler/Warnungen: " << summary.warningCount << L"<br>";
     html << L"Gescannte Pfade: " << HtmlEscape(JoinPathList(summary.scannedPaths)) << L"</div>\n";
 
@@ -135,12 +138,13 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
     WriteSortableHeader(html, L"Pluginname", 1, L"text");
     WriteSortableHeader(html, L"Kategorie", 2, L"text");
     WriteSortableHeader(html, L"Version", 3, L"text");
-    WriteSortableHeader(html, L"Typ", 4, L"text");
-    WriteSortableHeader(html, L"Pfad", 5, L"text");
-    WriteSortableHeader(html, L"Dateigroesse", 6, L"number");
-    WriteSortableHeader(html, L"Aenderungsdatum", 7, L"number");
-    WriteSortableHeader(html, L"Dublette", 8, L"number");
-    WriteSortableHeader(html, L"Status", 9, L"text");
+    WriteSortableHeader(html, L"Versionsquelle", 4, L"text");
+    WriteSortableHeader(html, L"Typ", 5, L"text");
+    WriteSortableHeader(html, L"Pfad", 6, L"text");
+    WriteSortableHeader(html, L"Dateigroesse", 7, L"number");
+    WriteSortableHeader(html, L"Aenderungsdatum", 8, L"number");
+    WriteSortableHeader(html, L"Dublette", 9, L"number");
+    WriteSortableHeader(html, L"Status", 10, L"text");
     html << L"</tr></thead><tbody>\n";
 
     for (const auto& record : records) {
@@ -153,6 +157,7 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
         html << L"<td>" << HtmlEscape(record.pluginName) << L"</td>";
         html << L"<td>" << HtmlEscape(record.category) << L"</td>";
         html << L"<td>" << HtmlEscape(record.version) << L"</td>";
+        html << L"<td>" << HtmlEscape(ToDisplayText(record.versionSource)) << L"</td>";
         html << L"<td>" << ToDisplayText(record.pluginType) << L"</td>";
         html << L"<td><code>" << HtmlEscape(record.filePath) << L"</code></td>";
         html << L"<td data-sort=\"" << record.fileSize << L"\">" << HtmlEscape(FormatFileSize(record.fileSize)) << L"</td>";
@@ -196,12 +201,13 @@ bool ReportWriter::WriteCsv(const std::filesystem::path& outputPath,
                             const ScanSummary&,
                             std::wstring& errorMessage) const {
     std::wstringstream csv;
-    csv << L"Hersteller;Pluginname;Kategorie;Version;Typ;Pfad;Dateiname;Dateigroesse;Aenderungsdatum;Dublette;Status;Warnung\n";
+    csv << L"Hersteller;Pluginname;Kategorie;Version;Versionsquelle;Typ;Pfad;Dateiname;Dateigroesse;Aenderungsdatum;Dublette;Status;Warnung\n";
     for (const auto& record : records) {
         csv << CsvEscape(record.manufacturer) << L";"
             << CsvEscape(record.pluginName) << L";"
             << CsvEscape(record.category) << L";"
             << CsvEscape(record.version) << L";"
+            << CsvEscape(ToDisplayText(record.versionSource)) << L";"
             << ToDisplayText(record.pluginType) << L";"
             << CsvEscape(record.filePath) << L";"
             << CsvEscape(record.fileName) << L";"
@@ -229,6 +235,9 @@ bool ReportWriter::WriteTxt(const std::filesystem::path& outputPath,
     text << L"Dubletten-Gruppen: " << summary.duplicateCount << L"\n";
     text << L"Dubletten-Eintraege: " << summary.duplicateEntryCount << L"\n";
     text << L"VST2-Dubletten loeschbar: " << summary.vst2DuplicateCandidateCount << L"\n";
+    text << L"Version zuverlaessig ermittelt: " << summary.versionDetectedCount << L"\n";
+    text << L"Version heuristisch aus Dateiname: " << summary.versionHeuristicCount << L"\n";
+    text << L"Version fehlt: " << summary.versionMissingCount << L"\n";
     text << L"Fehler/Warnungen: " << summary.warningCount << L"\n";
     text << L"Gescannte Pfade: " << JoinPathList(summary.scannedPaths) << L"\n\n";
 
@@ -237,6 +246,7 @@ bool ReportWriter::WriteTxt(const std::filesystem::path& outputPath,
         text << L"  Hersteller: " << record.manufacturer << L"\n";
         text << L"  Kategorie: " << record.category << L"\n";
         text << L"  Version: " << record.version << L"\n";
+        text << L"  Versionsquelle: " << ToDisplayText(record.versionSource) << L"\n";
         text << L"  Pfad: " << record.filePath << L"\n";
         text << L"  Dateiname: " << record.fileName << L"\n";
         text << L"  Dateigroesse: " << FormatFileSize(record.fileSize) << L"\n";

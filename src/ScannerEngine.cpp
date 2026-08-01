@@ -8,11 +8,13 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <set>
+#include <span>
 #include <system_error>
 #include <vector>
 
@@ -23,12 +25,63 @@ struct Candidate {
     PluginType type;
 };
 
+class ReadOnlyMappedFile {
+public:
+    explicit ReadOnlyMappedFile(const std::filesystem::path& path) {
+        file_ = CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file_ == INVALID_HANDLE_VALUE) {
+            return;
+        }
+
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file_, &size) || size.QuadPart <= 0 ||
+            static_cast<unsigned long long>(size.QuadPart) >
+                static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+            return;
+        }
+        size_ = static_cast<std::size_t>(size.QuadPart);
+
+        mapping_ = CreateFileMappingW(file_, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!mapping_) {
+            return;
+        }
+        data_ = static_cast<const unsigned char*>(MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, 0));
+    }
+
+    ~ReadOnlyMappedFile() {
+        if (data_) {
+            UnmapViewOfFile(data_);
+        }
+        if (mapping_) {
+            CloseHandle(mapping_);
+        }
+        if (file_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(file_);
+        }
+    }
+
+    ReadOnlyMappedFile(const ReadOnlyMappedFile&) = delete;
+    ReadOnlyMappedFile& operator=(const ReadOnlyMappedFile&) = delete;
+
+    [[nodiscard]] std::span<const unsigned char> Bytes() const noexcept {
+        return data_ ? std::span<const unsigned char>(data_, size_) : std::span<const unsigned char>{};
+    }
+
+private:
+    HANDLE file_ = INVALID_HANDLE_VALUE;
+    HANDLE mapping_ = nullptr;
+    const unsigned char* data_ = nullptr;
+    std::size_t size_ = 0;
+};
+
 bool HasExtension(const std::filesystem::path& path, const std::wstring& extension) {
     return ToLower(path.extension().wstring()) == extension;
 }
 
 template <typename T>
-bool ReadStruct(const std::vector<unsigned char>& bytes, std::size_t offset, T& out) {
+bool ReadStruct(std::span<const unsigned char> bytes, std::size_t offset, T& out) {
     if (offset > bytes.size() || bytes.size() - offset < sizeof(T)) {
         return false;
     }
@@ -36,7 +89,7 @@ bool ReadStruct(const std::vector<unsigned char>& bytes, std::size_t offset, T& 
     return true;
 }
 
-bool ReadNullTerminatedAscii(const std::vector<unsigned char>& bytes, std::size_t offset, std::string& out) {
+bool ReadNullTerminatedAscii(std::span<const unsigned char> bytes, std::size_t offset, std::string& out) {
     if (offset >= bytes.size()) {
         return false;
     }
@@ -58,15 +111,24 @@ bool ReadNullTerminatedAscii(const std::vector<unsigned char>& bytes, std::size_
 std::optional<std::size_t> RvaToOffset(
     DWORD rva,
     const std::vector<IMAGE_SECTION_HEADER>& sections,
-    std::size_t fileSize) {
+    std::size_t fileSize,
+    DWORD sizeOfHeaders) {
+    if (rva < sizeOfHeaders && rva < fileSize) {
+        return static_cast<std::size_t>(rva);
+    }
     for (const auto& section : sections) {
-        const DWORD start = section.VirtualAddress;
-        const DWORD span = std::max(section.Misc.VirtualSize, section.SizeOfRawData);
-        const DWORD end = start + span;
+        const std::uint64_t start = section.VirtualAddress;
+        const std::uint64_t span = std::max(section.Misc.VirtualSize, section.SizeOfRawData);
+        const std::uint64_t end = start + span;
         if (rva >= start && rva < end) {
-            const std::size_t offset = static_cast<std::size_t>(section.PointerToRawData + (rva - start));
+            const std::uint64_t sectionOffset = static_cast<std::uint64_t>(rva) - start;
+            if (sectionOffset >= section.SizeOfRawData) {
+                return std::nullopt;
+            }
+            const std::uint64_t offset = static_cast<std::uint64_t>(section.PointerToRawData) +
+                sectionOffset;
             if (offset < fileSize) {
-                return offset;
+                return static_cast<std::size_t>(offset);
             }
         }
     }
@@ -74,14 +136,8 @@ std::optional<std::size_t> RvaToOffset(
 }
 
 bool HasVst2EntrypointExport(const std::filesystem::path& path) {
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) {
-        return false;
-    }
-
-    std::vector<unsigned char> bytes(
-        (std::istreambuf_iterator<char>(stream)),
-        std::istreambuf_iterator<char>());
+    const ReadOnlyMappedFile file(path);
+    const std::span<const unsigned char> bytes = file.Bytes();
     if (bytes.size() < sizeof(IMAGE_DOS_HEADER)) {
         return false;
     }
@@ -104,26 +160,38 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
     }
 
     const std::size_t optionalOffset = fileHeaderOffset + sizeof(IMAGE_FILE_HEADER);
+    if (fileHeader.NumberOfSections == 0 || fileHeader.NumberOfSections > 96) {
+        return false;
+    }
     WORD magic = 0;
     if (!ReadStruct(bytes, optionalOffset, magic)) {
         return false;
     }
 
     IMAGE_DATA_DIRECTORY exportDirectoryEntry{};
+    DWORD sizeOfHeaders = 0;
     if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        if (fileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64)) {
+            return false;
+        }
         IMAGE_OPTIONAL_HEADER64 optionalHeader{};
         if (!ReadStruct(bytes, optionalOffset, optionalHeader) ||
             optionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
             return false;
         }
         exportDirectoryEntry = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        sizeOfHeaders = optionalHeader.SizeOfHeaders;
     } else if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        if (fileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER32)) {
+            return false;
+        }
         IMAGE_OPTIONAL_HEADER32 optionalHeader{};
         if (!ReadStruct(bytes, optionalOffset, optionalHeader) ||
             optionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
             return false;
         }
         exportDirectoryEntry = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        sizeOfHeaders = optionalHeader.SizeOfHeaders;
     } else {
         return false;
     }
@@ -143,7 +211,7 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
         sections.push_back(section);
     }
 
-    const auto exportOffset = RvaToOffset(exportDirectoryEntry.VirtualAddress, sections, bytes.size());
+    const auto exportOffset = RvaToOffset(exportDirectoryEntry.VirtualAddress, sections, bytes.size(), sizeOfHeaders);
     if (!exportOffset) {
         return false;
     }
@@ -153,8 +221,11 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
         return false;
     }
 
-    const auto namesOffset = RvaToOffset(exportDirectory.AddressOfNames, sections, bytes.size());
+    const auto namesOffset = RvaToOffset(exportDirectory.AddressOfNames, sections, bytes.size(), sizeOfHeaders);
     if (!namesOffset) {
+        return false;
+    }
+    if (exportDirectory.NumberOfNames > (bytes.size() - *namesOffset) / sizeof(DWORD)) {
         return false;
     }
 
@@ -163,7 +234,7 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
         if (!ReadStruct(bytes, *namesOffset + static_cast<std::size_t>(i) * sizeof(DWORD), nameRva)) {
             return false;
         }
-        const auto nameOffset = RvaToOffset(nameRva, sections, bytes.size());
+        const auto nameOffset = RvaToOffset(nameRva, sections, bytes.size(), sizeOfHeaders);
         if (!nameOffset) {
             continue;
         }
@@ -294,6 +365,13 @@ ScanSummary BuildSummary(const std::vector<PluginRecord>& records,
             record.status == ScanStatus::Unknown ||
             !record.warningMessage.empty()) {
             ++summary.warningCount;
+        }
+        if (record.versionSource == VersionSource::Unknown || Trim(record.version).empty()) {
+            ++summary.versionMissingCount;
+        } else if (record.versionSource == VersionSource::FileName) {
+            ++summary.versionHeuristicCount;
+        } else {
+            ++summary.versionDetectedCount;
         }
     }
     summary.duplicateCount = duplicateGroups.size();

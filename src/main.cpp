@@ -3,6 +3,7 @@
 #include "StringUtil.h"
 #include "DuplicateDetector.h"
 #include "PluginUserPrefs.h"
+#include "VersionUtil.h"
 
 #include <Windows.h>
 #include <windowsx.h>
@@ -18,6 +19,7 @@
 #include <memory>
 #include <cwchar>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -60,7 +62,7 @@ constexpr int IDC_INLINE_EDIT = 1027;
 constexpr UINT IDM_OPEN_IN_EXPLORER = 40001;
 constexpr UINT IDM_DELETE_SELECTED = 40002;
 
-constexpr wchar_t APP_VERSION[] = L"1.0.2.0";
+constexpr wchar_t APP_VERSION[] = L"1.1.0.0";
 
 constexpr UINT WM_SCAN_PROGRESS = WM_APP + 1;
 constexpr UINT WM_SCAN_LOG = WM_APP + 2;
@@ -74,9 +76,17 @@ struct ProgressMessage {
 
 struct DoneMessage {
     bool stopped = false;
+    std::wstring fatalError;
     ScanSummary summary;
     std::vector<PluginRecord> records;
 };
+
+template <typename T>
+void PostOwnedMessage(HWND window, UINT messageId, std::unique_ptr<T> message) {
+    if (PostMessageW(window, messageId, 0, reinterpret_cast<LPARAM>(message.get()))) {
+        message.release();
+    }
+}
 
 struct AppState {
     HWND window = nullptr;
@@ -138,7 +148,10 @@ std::wstring SummaryText(const ScanSummary& summary) {
         L" | AAX: " + std::to_wstring(summary.aaxCount) +
         L" | Dubletten-Gruppen: " + std::to_wstring(summary.duplicateCount) +
         L" | Eintraege: " + std::to_wstring(summary.duplicateEntryCount) +
-        L" | VST2 loeschbar: " + std::to_wstring(summary.vst2DuplicateCandidateCount);
+        L" | VST2 loeschbar: " + std::to_wstring(summary.vst2DuplicateCandidateCount) +
+        L" | Version sicher: " + std::to_wstring(summary.versionDetectedCount) +
+        L" | heuristisch: " + std::to_wstring(summary.versionHeuristicCount) +
+        L" | fehlt: " + std::to_wstring(summary.versionMissingCount);
 }
 
 void UpdateSummaryLabel(AppState& state) {
@@ -189,10 +202,11 @@ void PopulateResultsList(HWND list, const std::vector<PluginRecord>& records) {
         SetListText(list, i, 2, record.pluginName);
         SetListText(list, i, 3, record.category);
         SetListText(list, i, 4, record.version);
-        SetListText(list, i, 5, FileSizeText(record.fileSize));
-        SetListText(list, i, 6, record.isPossibleDuplicate ? L"Ja" : L"Nein");
-        SetListText(list, i, 7, ToDisplayText(record));
-        SetListText(list, i, 8, record.filePath);
+        SetListText(list, i, 5, ToDisplayText(record.versionSource));
+        SetListText(list, i, 6, FileSizeText(record.fileSize));
+        SetListText(list, i, 7, record.isPossibleDuplicate ? L"Ja" : L"Nein");
+        SetListText(list, i, 8, ToDisplayText(record));
+        SetListText(list, i, 9, record.filePath);
     }
 }
 
@@ -209,12 +223,14 @@ std::wstring SortText(const PluginRecord& record, int column) {
     case 4:
         return record.version;
     case 5:
-        return std::to_wstring(record.fileSize);
+        return ToDisplayText(record.versionSource);
     case 6:
-        return record.isPossibleDuplicate ? L"Ja" : L"Nein";
+        return std::to_wstring(record.fileSize);
     case 7:
-        return ToDisplayText(record);
+        return record.isPossibleDuplicate ? L"Ja" : L"Nein";
     case 8:
+        return ToDisplayText(record);
+    case 9:
         return record.filePath;
     default:
         return {};
@@ -231,7 +247,14 @@ void SortRecords(AppState& state, int column) {
 
     std::sort(state.records.begin(), state.records.end(), [&](const PluginRecord& left, const PluginRecord& right) {
         int cmp = 0;
-        if (column == 5) {
+        if (column == 4) {
+            const auto versionComparison = CompareVersionStrings(left.version, right.version);
+            if (versionComparison) {
+                cmp = *versionComparison;
+            } else {
+                cmp = _wcsicmp(left.version.c_str(), right.version.c_str());
+            }
+        } else if (column == 6) {
             if (left.fileSize < right.fileSize) {
                 cmp = -1;
             } else if (left.fileSize > right.fileSize) {
@@ -285,7 +308,7 @@ void UpdateEditedRecordField(PluginRecord& record, int column, const std::wstrin
     } else if (column == 3) {
         record.category = value;
     } else if (column == 4) {
-        record.version = value;
+        record.version = NormalizeVersionString(value);
     }
 }
 
@@ -330,6 +353,7 @@ void FinishInlineEdit(AppState& state, bool commit) {
             record.manuallyEdited = true;
             if (column == 4) {
                 record.versionManuallyEdited = true;
+                record.versionSource = VersionSource::ManualEdit;
             }
             record.metadataFromManualOverrides = false;
 
@@ -337,7 +361,8 @@ void FinishInlineEdit(AppState& state, bool commit) {
             SetListText(state.results, row, 2, record.pluginName);
             SetListText(state.results, row, 3, record.category);
             SetListText(state.results, row, 4, record.version);
-            SetListText(state.results, row, 7, ToDisplayText(record));
+            SetListText(state.results, row, 5, ToDisplayText(record.versionSource));
+            SetListText(state.results, row, 8, ToDisplayText(record));
             EnableWindow(state.saveOverridesButton, TRUE);
             SetWindowTextW(state.status, L"Manuelle Aenderung uebernommen.");
         }
@@ -692,26 +717,39 @@ void StartScan(AppState& state) {
 
     HWND window = state.window;
     std::atomic_bool* stopFlag = &state.stopRequested;
-    state.worker = std::thread([window, stopFlag, options]() {
-        ScannerEngine engine;
-        ScanResult result = engine.Scan(
-            options,
-            *stopFlag,
-            [window](const ScanProgress& progress) {
-                auto* message = new ProgressMessage{ progress.current, progress.total, progress.message };
-                PostMessageW(window, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(message));
-            },
-            [window](const std::wstring& line) {
-                auto* message = new std::wstring(line);
-                PostMessageW(window, WM_SCAN_LOG, 0, reinterpret_cast<LPARAM>(message));
-            });
-
-        auto* done = new DoneMessage;
-        done->stopped = stopFlag->load();
-        done->summary = std::move(result.summary);
-        done->records = std::move(result.records);
-        PostMessageW(window, WM_SCAN_DONE, 0, reinterpret_cast<LPARAM>(done));
-    });
+    try {
+        state.worker = std::thread([window, stopFlag, options]() {
+            auto done = std::make_unique<DoneMessage>();
+            try {
+                ScannerEngine engine;
+                ScanResult result = engine.Scan(
+                    options,
+                    *stopFlag,
+                    [window](const ScanProgress& progress) {
+                        PostOwnedMessage(window, WM_SCAN_PROGRESS,
+                            std::make_unique<ProgressMessage>(ProgressMessage{
+                                progress.current, progress.total, progress.message }));
+                    },
+                    [window](const std::wstring& line) {
+                        PostOwnedMessage(window, WM_SCAN_LOG, std::make_unique<std::wstring>(line));
+                    });
+                done->summary = std::move(result.summary);
+                done->records = std::move(result.records);
+            } catch (const std::exception& ex) {
+                done->fatalError = L"Unerwarteter Scanfehler: " + Utf8ToWide(ex.what());
+            } catch (...) {
+                done->fatalError = L"Unerwarteter unbekannter Scanfehler.";
+            }
+            done->stopped = stopFlag->load();
+            PostOwnedMessage(window, WM_SCAN_DONE, std::move(done));
+        });
+    } catch (const std::system_error& ex) {
+        SetRunningState(state, false);
+        const std::wstring error = L"Scan-Thread konnte nicht gestartet werden: " + Utf8ToWide(ex.what());
+        SetWindowTextW(state.status, L"Scan konnte nicht gestartet werden.");
+        AppendLog(state.log, error);
+        MessageBoxW(state.window, error.c_str(), L"Scanfehler", MB_OK | MB_ICONERROR);
+    }
 }
 
 void ExportResults(AppState& state) {
@@ -1007,10 +1045,11 @@ void CreateMainControls(HWND window, AppState& state) {
     InsertColumn(state.results, 2, L"Plugin", 170);
     InsertColumn(state.results, 3, L"Kategorie", 110);
     InsertColumn(state.results, 4, L"Version", 90);
-    InsertColumn(state.results, 5, L"Groesse", 90);
-    InsertColumn(state.results, 6, L"Dublette", 80);
-    InsertColumn(state.results, 7, L"Status", 150);
-    InsertColumn(state.results, 8, L"Pfad", 520);
+    InsertColumn(state.results, 5, L"Versionsquelle", 165);
+    InsertColumn(state.results, 6, L"Groesse", 90);
+    InsertColumn(state.results, 7, L"Dublette", 80);
+    InsertColumn(state.results, 8, L"Status", 170);
+    InsertColumn(state.results, 9, L"Pfad", 520);
 
     state.log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
@@ -1173,7 +1212,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             state->records = std::move(done->records);
             PopulateResultsList(state->results, state->records);
             UpdateSummaryLabel(*state);
-            if (done->stopped) {
+            if (!done->fatalError.empty()) {
+                SetWindowTextW(state->status, L"Scan mit Fehler beendet.");
+                AppendLog(state->log, done->fatalError);
+                MessageBoxW(window, done->fatalError.c_str(), L"Scanfehler", MB_OK | MB_ICONERROR);
+            } else if (done->stopped) {
                 SetWindowTextW(state->status, L"Scan abgebrochen. Ergebnisse koennen exportiert werden.");
                 AppendLog(state->log, L"Scan abgebrochen.");
             } else {
@@ -1239,10 +1282,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     RegisterClassExW(&windowClass);
 
     AppState state;
+    const std::wstring windowTitle = L"Windows VST Plugin Scanner " + std::wstring(APP_VERSION);
     HWND window = CreateWindowExW(
         0,
         className,
-        L"Windows VST Plugin Scanner 1.0.2.0",
+        windowTitle.c_str(),
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,

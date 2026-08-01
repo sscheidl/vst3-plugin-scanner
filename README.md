@@ -22,6 +22,14 @@ Native Windows application for scanning installed VST2, VST3, CLAP and AAX plugi
   - `CompanyName`
   - `FileVersion`
   - `ProductVersion`
+- Deterministic version-source priority and visible provenance:
+  - VST3 `moduleinfo.json`
+  - Windows `ProductVersion`
+  - Windows `FileVersion`
+  - numeric `VS_FIXEDFILEINFO`
+  - conservative filename fallback
+- Numeric version normalization/comparison (`1.10` sorts after `1.9`).
+- Scan summary counts reliable, heuristic and missing versions separately.
 - Conservative fallback to filename/folder name when metadata is missing.
 - Conservative local category inference for common plugin types such as Instrument, Reverb, Compressor, EQ, Delay and Metering.
 - Duplicate detection for possible cross-format pairs.
@@ -51,7 +59,7 @@ x64\Release\VstPluginScanner.exe
 ```
 
 The project uses the Visual Studio 2022 `v143` toolset, C++20 and the Windows 10/11 SDK.
-The executable embeds Windows version information `1.0.0.0`.
+The executable embeds Windows version information `1.1.0.0`.
 
 Or run:
 
@@ -66,6 +74,7 @@ If CMake is installed:
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 The executable is created under:
@@ -76,16 +85,27 @@ build\Release\VstPluginScanner.exe
 
 ## Safety Notes
 
-- Plugin DLLs are never loaded with `LoadLibrary`.
+- Plugin DLLs are never loaded with `LoadLibrary` in the scanner process.
 - The scanner reads only filesystem metadata and Windows version resources.
-- No plugin files are modified or deleted.
+- A scan never changes plug-in files. Explicit cleanup commands move selected files to the Windows Recycle Bin after confirmation.
 - No registry write access is used.
 - Access-denied and broken files are logged and skipped safely.
 
-## Later Experiments
+## Steinberg VST3 SDK Preparation
 
-- Steinberg VST 3 SDK is officially available from Steinberg and the public GitHub repository `steinbergmedia/vst3sdk`.
-- The SDK can be useful later for optional VST3-specific inspection experiments, but the current scanner intentionally avoids loading or initializing plugin binaries.
+- The official SDK is available at `https://github.com/steinbergmedia/vst3sdk` under the MIT license.
+- `IVst3SdkProbe` is the integration seam for a future SDK-backed helper.
+- The current implementation is a disabled stub and does not load plug-ins.
+- Any future SDK probe must run out of process with timeout/crash isolation.
+- CMake can validate a recursive SDK checkout without enabling plug-in loading:
+
+```powershell
+cmake -S . -B build -A x64 `
+  -DVST3_SCANNER_PREPARE_STEINBERG_SDK=ON `
+  -DVST3_SDK_ROOT=C:\path\to\vst3sdk
+```
+
+See `docs/VST3_SDK_INTEGRATION.md` for the integration plan.
 
 ## Project Structure
 
@@ -97,11 +117,18 @@ include/
   ReportWriter.h
   ScannerEngine.h
   StringUtil.h
+  VersionUtil.h
+  Vst3SdkProbe.h
 src/
   DuplicateDetector.cpp
   MetadataReader.cpp
   ReportWriter.cpp
   ScannerEngine.cpp
   StringUtil.cpp
+  VersionUtil.cpp
+  Vst3SdkProbeStub.cpp
   main.cpp
+tests/
+  MetadataReaderTests.cpp
+  VersionUtilTests.cpp
 ```
