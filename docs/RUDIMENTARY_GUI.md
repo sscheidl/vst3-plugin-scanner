@@ -27,8 +27,13 @@ direkt mit einer deutschen Excel-Installation oeffnen.
   verwendet. Es gibt keine Namensheuristik.
 - Controller-, Compatibility- und ARA-Hilfsklassen werden nicht als eigene Plugins
   gezaehlt.
+- Multi-Plugin-Module wie WaveShells werden nicht als eine Shell-Zeile dargestellt:
+  Jede gemeldete Audio-Klasse erscheint als eigenes Plugin, die Spalte `Modul` zeigt
+  jeweils die gemeinsame WaveShell-Datei.
 - Eine CID ist nur dann eine moegliche Dublette, wenn sie aus mindestens zwei
   verschiedenen Modulpfaden stammt.
+- CID bleibt intern und im JSON erhalten, wird aber weder im Fenster noch im CSV
+  angezeigt.
 - Fehler und Dateisystemwarnungen erscheinen als eigene Problemzeilen.
 
 ## Cache
@@ -40,11 +45,12 @@ alle gueltigen Moduleintraege. Der Schluessel beruecksichtigt:
 - den kanonischen Modulpfad,
 - relative Dateien eines Bundles,
 - Dateigroessen,
-- Aenderungszeiten.
+- Aenderungszeiten,
+- den vollstaendigen Inhalt von VST3-/DLL-Binaerdateien und `moduleinfo.json`.
 
 Die Checkbox ist standardmaessig nicht markiert; ein normaler Scan prueft daher jedes
 Modul neu und schreibt keine Cachedateien. Jeder Cachetreffer wird erneut als
-Schema-1-JSON validiert. Fehler, Timeouts,
+Schema-2-JSON validiert. Fehler, Timeouts,
 `no_classes` und ungueltige Protokollantworten werden nicht gespeichert. Aendert sich
 ein Modul, entsteht automatisch ein neuer Cacheeintrag.
 
@@ -73,7 +79,9 @@ Datei ersetzt. Ist Schema oder Inhalt ungueltig, wird kein Eintrag daraus verwen
 
 Jeder Versuch laeuft in einem eigenen Windows Job Object. Stoppen, Fensterschliessen
 und Timeout beenden den gesamten Probe-Prozessbaum. Die GUI linkt kein Plugin-Hosting
-und bleibt waehrend des Scans bedienbar.
+und bleibt waehrend des Scans bedienbar. Nach einer fehlgeschlagenen Terminierung
+wird maximal fuenf Sekunden weiter gewartet; danach folgt eine sichtbare Problemzeile
+statt eines unbegrenzten Pipe-Thread-Wartens.
 
 ## Verifizierte Tests
 
@@ -82,6 +90,7 @@ und bleibt waehrend des Scans bedienbar.
 - Nur Audio-Klassen gelangen ins Inventar.
 - Factory-Hersteller wird bei leerem Klassenhersteller korrekt uebernommen.
 - CID-Dubletten werden nur ueber verschiedene Modulpfade markiert.
+- Eine simulierte WaveShell-Antwort erzeugt eine Inventarzeile je Audio-Klasse.
 - CSV- und JSON-Export bewahren den rohen Versionswert.
 - Reales `bitcrust.vst3`: erster Lauf erzeugt den Cache; zweiter Lauf meldet einen
   Cachetreffer und startet keine erneute Probe.

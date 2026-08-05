@@ -131,7 +131,6 @@ std::string SerializeProbeResult(const ProbeResult& result) {
     output << ",\"module\":{";
     output << "\"path\":"; WriteString(output, result.module.path);
     output << ",\"name\":"; WriteString(output, result.module.name);
-    output << ",\"binaryPath\":"; WriteString(output, result.module.binaryPath);
     output << ",\"isBundle\":" << (result.module.isBundle ? "true" : "false");
     output << ",\"factoryVendor\":"; WriteString(output, result.module.factoryVendor);
     output << ",\"factoryUrl\":"; WriteString(output, result.module.factoryUrl);

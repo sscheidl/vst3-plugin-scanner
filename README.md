@@ -8,7 +8,7 @@ Der vorherige passive C++-Scanner ist unverändert über den Tag
 `cpp-v1.1.0-pre-restart` verfügbar. Seine Heuristiken und Windows-Dateiversionen
 fließen nicht in die Ergebnisse dieser Studie ein.
 
-## Aktueller Stand: Inventar und optionaler Cache (2.2.3)
+## Aktueller Stand: Inventar und optionaler Cache (2.3.0)
 
 Der Branch baut eine isolierte x64-Metadatenprobe und eine native Win32-GUI:
 
@@ -23,17 +23,19 @@ zwischengespeicherte Kandidat laeuft in einem eigenen Probe-Prozess. Der erste
 Versuch ist auf 15 Sekunden begrenzt; nur nach Timeout folgt genau eine
 Wiederholung mit maximal 30 Sekunden.
 
-Version 2.2.3 bietet:
+Version 2.3.0 bietet:
 
 - strikte Validierung des JSON-Protokolls und `protocol_error` bei leerer Ausgabe;
 - eine sortierbare Tabelle fuer `Audio Module Class`-Eintraege;
 - CID-basierte Dublettenerkennung ueber verschiedene Modulpfade;
 - einen standardmaessig deaktivierten, optionalen Einzeldatei-Cache
-  `vst3_scanner_cache.json` neben der EXE;
+  `vst3_scanner_cache.json` neben der EXE mit Inhaltsfingerprint der Modulbinaerdatei;
 - statisch eingebundene MSVC-Runtimes fuer eine portable Release-Ausgabe;
-- CSV-Export mit UTF-8-BOM und Semikolon;
+- harmonisierte Fenster- und CSV-Spalten mit UTF-8-BOM und Semikolon;
 - strukturierten JSON-Export;
-- Problemzeilen fuer Ladefehler, `no_classes`, Timeouts und Dateisystemwarnungen.
+- aufgeloeste Multi-Plugin-Module wie WaveShells als eine Zeile je Audioklasse;
+- Problemzeilen fuer Ladefehler, `no_classes`, Timeouts und Dateisystemwarnungen;
+- begrenztes Prozess-Warten mit Fehlermeldung statt blockierender Pipe-Threads;
 - eingeschraenkte Handle-Vererbung sowie eigene Diagnosen fuer abgestuerzte Probes.
 
 Controller-, Compatibility- und ARA-Hilfsklassen werden nicht als Plugins gezaehlt.
@@ -100,14 +102,14 @@ Beide EXE-Dateien müssen im selben Verzeichnis bleiben. Weitere Details stehen 
 
 ## Prozessprotokoll
 
-Das JSON-Schema hat aktuell Version `1`. Eine erfolgreiche Antwort enthält
+Das JSON-Schema hat aktuell Version `2`. Eine erfolgreiche Antwort enthält
 Moduldaten sowie einen Eintrag für jeden von der Factory gemeldeten Klassenindex.
 Wichtige unverfälschte Felder sind `version` und `sdkVersion`; intern heißen sie
 `ClassVersionRaw` und `SdkVersionRaw`.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "status": "ok",
   "module": {
     "path": "C:\\Program Files\\Common Files\\VST3\\Example.vst3",

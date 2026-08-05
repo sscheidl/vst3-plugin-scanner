@@ -41,7 +41,6 @@ struct Vst3ClassData {
 struct Vst3ModuleData {
     std::string path;
     std::string name;
-    std::string binaryPath;
     bool isBundle = false;
     std::string factoryVendor;
     std::string factoryUrl;
@@ -52,7 +51,7 @@ struct Vst3ModuleData {
 };
 
 struct ProbeResult {
-    std::int32_t schemaVersion = 1;
+    std::int32_t schemaVersion = 2;
     ProbeStatus status = ProbeStatus::ProtocolError;
     Vst3ModuleData module;
     std::vector<Vst3ClassData> classes;

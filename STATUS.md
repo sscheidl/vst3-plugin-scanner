@@ -1,6 +1,6 @@
 # Projektstatus
 
-Version: 2.2.3
+Version: 2.3.0
 Branch: `restart/vst3-sdk-probe`
 
 ## Aktiver Scanner
@@ -24,6 +24,7 @@ Versions- oder Herstellerheuristik.
 - Stoppen, Timeout und Fensterschließen beenden den gesamten Probe-Prozessbaum.
 - Nur die drei Standard-Handles werden an den Probe-Prozess vererbt.
 - Abstürze und widersprüchliche Prozessantworten werden gesondert diagnostiziert.
+- Fehlgeschlagene Prozessbeendigung blockiert die GUI nicht unbegrenzt.
 - `.vst3`-Dateien und Bundle-Verzeichnisse werden rekursiv erkannt.
 - Verzeichnis-Symlinks werden nicht verfolgt.
 
@@ -32,10 +33,13 @@ Versions- oder Herstellerheuristik.
 Der optionale Cache ist standardmäßig deaktiviert. Wenn er aktiviert wird, liegt die
 einzige Datei `vst3_scanner_cache.json` neben der GUI-EXE. Ein Cachetreffer setzt einen
 unveränderten Pfad, unveränderte Dateigrößen und unveränderte Änderungszeiten voraus.
+Zusätzlich wird der Inhalt von VST3-/DLL-Binärdateien und `moduleinfo.json` gehasht.
 Nur erfolgreiche und erneut validierte Probe-Antworten werden gespeichert.
 
-CSV wird mit UTF-8-BOM und Semikolon geschrieben. JSON bewahrt die Rohwerte der
-Factory einschließlich Version, SDK-Version, Diagnose und Probe-Laufzeit.
+Fenstertabelle und CSV verwenden dieselbe Spaltenreihenfolge. Multi-Plugin-Module
+wie WaveShells erscheinen als eine Zeile pro Audio-Klasse mit gemeinsamer Moduldatei.
+CID bleibt intern für die Dublettenerkennung und im JSON erhalten. CSV wird mit
+UTF-8-BOM und Semikolon geschrieben.
 
 ## Historischer Stand
 

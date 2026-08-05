@@ -56,7 +56,6 @@ bewusst als `load_error` erhalten.
 | --- | --- |
 | `path` | unverändertes UTF-8-Kommandozeilenargument |
 | `name` | `VST3::Hosting::Module::getName()` |
-| `binaryPath` | leer, solange der offizielle Loader keinen Pfad bereitstellt |
 | `isBundle` | `VST3::Hosting::Module::isBundle()` |
 | `factoryVendor` | `PFactoryInfo::vendor` |
 | `factoryUrl` | `PFactoryInfo::url` |

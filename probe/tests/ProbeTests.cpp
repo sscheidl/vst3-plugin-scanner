@@ -70,6 +70,10 @@ void TestProtocolWithMultipleClassesAndMissingVersion() {
     result.classes.push_back(second);
 
     const auto json = vst3scanner::SerializeProbeResult(result);
+    Check(json.find("\"schemaVersion\":2") != std::string::npos,
+          "protocol schema 2 must be serialized");
+    Check(json.find("binaryPath") == std::string::npos,
+          "removed binaryPath field must not be serialized");
     Check(json.find("\"classCount\":2") != std::string::npos,
           "module class count must be serialized");
     Check(json.find("\"version\":\"2.4.1\"") != std::string::npos,

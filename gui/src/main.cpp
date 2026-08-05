@@ -23,7 +23,7 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"Vst3ProbeGuiWindow";
-constexpr wchar_t kWindowTitle[] = L"VST3 Plugin Scanner 2.2.3";
+constexpr wchar_t kWindowTitle[] = L"VST3 Plugin Scanner 2.3.0";
 constexpr UINT kProbeDoneMessage = WM_APP + 1;
 constexpr UINT kProgressMessage = WM_APP + 3;
 constexpr DWORD kInitialProbeTimeoutMs = 15'000;
@@ -94,6 +94,8 @@ struct ProbeRunResult {
     bool stopped = false;
     bool retried = false;
     bool fromCache = false;
+    bool processCompleted = false;
+    bool terminationIncomplete = false;
     std::size_t cacheHits = 0;
     std::vector<vst3scanner::InventoryRecord> inventory;
     std::vector<vst3scanner::ScanIssue> issues;
@@ -338,26 +340,53 @@ private:
     }
 }
 
-void ReadPipe(HANDLE pipe, std::string& destination, bool& truncated) {
-    char buffer[4096];
-    DWORD bytesRead = 0;
+struct PipeCapture {
+    std::string text;
+    DWORD error = ERROR_SUCCESS;
+    bool truncated = false;
     bool captureEnabled = true;
-    while (ReadFile(pipe, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead != 0) {
-        if (!captureEnabled) {
-            continue;
+    bool closed = false;
+};
+
+void DrainPipe(HANDLE pipe, PipeCapture& capture) {
+    char buffer[4096];
+    while (!capture.closed) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+            const auto error = GetLastError();
+            if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+                capture.closed = true;
+            } else if (capture.error == ERROR_SUCCESS) {
+                capture.error = error;
+            }
+            return;
         }
-        const auto available = kMaximumCapturedBytes > destination.size()
-                                   ? kMaximumCapturedBytes - destination.size()
-                                   : 0U;
-        const auto toCopy = std::min<std::size_t>(bytesRead, available);
-        try {
-            destination.append(buffer, toCopy);
-        } catch (...) {
-            captureEnabled = false;
-            truncated = true;
-            continue;
+        if (available == 0) return;
+
+        DWORD bytesRead = 0;
+        const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(sizeof(buffer)));
+        if (!ReadFile(pipe, buffer, requested, &bytesRead, nullptr) || bytesRead == 0) {
+            const auto error = GetLastError();
+            if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+                capture.closed = true;
+            } else if (capture.error == ERROR_SUCCESS) {
+                capture.error = error;
+            }
+            return;
         }
-        truncated = truncated || toCopy != bytesRead;
+        if (capture.captureEnabled) {
+            const auto remaining = kMaximumCapturedBytes > capture.text.size()
+                                       ? kMaximumCapturedBytes - capture.text.size()
+                                       : 0U;
+            const auto toCopy = std::min<std::size_t>(bytesRead, remaining);
+            try {
+                capture.text.append(buffer, toCopy);
+            } catch (...) {
+                capture.captureEnabled = false;
+                capture.truncated = true;
+            }
+            capture.truncated = capture.truncated || toCopy != bytesRead;
+        }
     }
 }
 
@@ -507,58 +536,101 @@ void RequestStop(AppState& state) {
     stderrWrite.Reset();
     nullInput.Reset();
 
-    std::string stdoutText;
-    std::string stderrText;
-    bool stdoutTruncated = false;
-    bool stderrTruncated = false;
-    std::thread stdoutReader;
-    std::thread stderrReader;
-    try {
-        stdoutReader = std::thread(ReadPipe, stdoutRead.Get(), std::ref(stdoutText),
-                                   std::ref(stdoutTruncated));
-        stderrReader = std::thread(ReadPipe, stderrRead.Get(), std::ref(stderrText),
-                                   std::ref(stderrTruncated));
-    } catch (...) {
-        TerminateJobObject(job.Get(), ERROR_NOT_ENOUGH_MEMORY);
-        WaitForSingleObject(process.Get(), 5'000);
-        if (stdoutReader.joinable()) stdoutReader.join();
-        if (stderrReader.joinable()) stderrReader.join();
-        throw;
+    PipeCapture stdoutCapture;
+    PipeCapture stderrCapture;
+    bool timedOut = false;
+    bool waitFailed = false;
+    bool terminationIncomplete = false;
+    DWORD waitError = ERROR_SUCCESS;
+    DWORD processControlError = ERROR_SUCCESS;
+    DWORD waitResult = WAIT_TIMEOUT;
+    const auto startedWaiting = GetTickCount64();
+
+    const auto terminateJob = [&](DWORD exitCode) {
+        if (!TerminateJobObject(job.Get(), exitCode) && processControlError == ERROR_SUCCESS) {
+            processControlError = GetLastError();
+        }
+    };
+
+    while (true) {
+        DrainPipe(stdoutRead.Get(), stdoutCapture);
+        DrainPipe(stderrRead.Get(), stderrCapture);
+        waitResult = WaitForSingleObject(process.Get(), 25);
+        if (waitResult == WAIT_OBJECT_0) break;
+        if (waitResult == WAIT_FAILED) {
+            waitFailed = true;
+            waitError = GetLastError();
+            terminateJob(waitError);
+            break;
+        }
+        if (state.stopRequested.load()) {
+            terminateJob(kStoppedExitCode);
+            break;
+        }
+        if (GetTickCount64() - startedWaiting >= timeoutMs) {
+            timedOut = true;
+            terminateJob(WAIT_TIMEOUT);
+            break;
+        }
     }
 
-    const DWORD waitResult = WaitForSingleObject(process.Get(), timeoutMs);
-    const bool timedOut = waitResult == WAIT_TIMEOUT;
-    const bool waitFailed = waitResult == WAIT_FAILED;
-    const DWORD waitError = waitFailed ? GetLastError() : ERROR_SUCCESS;
-    if (timedOut || waitFailed) {
-        TerminateJobObject(job.Get(), timedOut ? WAIT_TIMEOUT : waitError);
-        WaitForSingleObject(process.Get(), 5'000);
+    bool processExited = waitResult == WAIT_OBJECT_0;
+    if (!processExited) {
+        const auto terminationDeadline = GetTickCount64() + 5'000;
+        while (GetTickCount64() < terminationDeadline) {
+            DrainPipe(stdoutRead.Get(), stdoutCapture);
+            DrainPipe(stderrRead.Get(), stderrCapture);
+            waitResult = WaitForSingleObject(process.Get(), 25);
+            if (waitResult == WAIT_OBJECT_0) {
+                processExited = true;
+                break;
+            }
+            if (waitResult == WAIT_FAILED) {
+                if (waitError == ERROR_SUCCESS) waitError = GetLastError();
+                waitFailed = true;
+                break;
+            }
+        }
+        if (!processExited && WaitForSingleObject(process.Get(), 0) == WAIT_OBJECT_0) {
+            processExited = true;
+        }
+        terminationIncomplete = !processExited;
     } else {
-        // The probe may have spawned helpers that inherited the output pipes.
-        // Once the probe exits, no descendant is allowed to outlive this one-module job.
-        TerminateJobObject(job.Get(), ERROR_SUCCESS);
+        // Kill possible descendants after the direct probe process has exited.
+        terminateJob(ERROR_SUCCESS);
     }
 
-    stdoutReader.join();
-    stderrReader.join();
+    DrainPipe(stdoutRead.Get(), stdoutCapture);
+    DrainPipe(stderrRead.Get(), stderrCapture);
     stdoutRead.Reset();
     stderrRead.Reset();
 
-    GetExitCodeProcess(process.Get(), &result.exitCode);
-    result.jsonOutput = stdoutText;
-    result.stderrOutput = stderrText;
+    const bool exitCodeAvailable = processExited &&
+                                   GetExitCodeProcess(process.Get(), &result.exitCode) != FALSE;
+    result.processCompleted = exitCodeAvailable && !waitFailed && !terminationIncomplete;
+    result.terminationIncomplete = terminationIncomplete;
+    result.jsonOutput = stdoutCapture.text;
+    result.stderrOutput = stderrCapture.text;
     const bool stopped = state.stopRequested.load() && !timedOut;
     result.timedOut = timedOut;
     result.stopped = stopped;
-    if (timedOut) {
+    if (terminationIncomplete) {
+        result.protocolStatus = timedOut ? "timeout" : "protocol_error";
+        result.status = L"Probe-Prozess konnte nicht vollständig beendet werden";
+        result.output = L"Der Scan wurde nach fünf Sekunden fortgesetzt; der isolierte Job wird beim Schließen des Handles erneut beendet.";
+    } else if (timedOut) {
         result.protocolStatus = "timeout";
         result.status = L"Timeout nach " + std::to_wstring(timeoutMs / 1'000) + L" Sekunden";
     } else if (waitFailed) {
         result.status = L"Warten auf Probe fehlgeschlagen: " + FormatSystemError(waitError);
     } else if (stopped) {
         result.status = L"Prüfung abgebrochen";
+    } else if (!exitCodeAvailable) {
+        result.protocolStatus = "protocol_error";
+        result.status = L"Exitcode der Probe konnte nicht gelesen werden";
+        result.output = FormatSystemError(GetLastError());
     } else {
-        const auto parsed = vst3scanner::ParseProbeResultJson(stdoutText);
+        const auto parsed = vst3scanner::ParseProbeResultJson(stdoutCapture.text);
         result.protocolStatus = parsed.valid ? parsed.protocolStatus : "protocol_error";
         if (!parsed.valid && IsCrashExitCode(result.exitCode)) {
             result.protocolStatus = "crashed";
@@ -579,16 +651,27 @@ void RequestStop(AppState& state) {
         }
     }
 
-    if (!stdoutText.empty() && result.output.empty()) {
-        result.output = Utf8ToWide(PrettyPrintJson(stdoutText));
+    if (!stdoutCapture.text.empty() && result.output.empty()) {
+        result.output = Utf8ToWide(PrettyPrintJson(stdoutCapture.text));
     } else if (result.output.empty()) {
         result.output = L"Die Probe hat keine JSON-Ausgabe geliefert.";
     }
-    if (!stderrText.empty()) {
+    if (!stderrCapture.text.empty()) {
         result.output.append(L"\r\n\r\n--- Diagnose (stderr) ---\r\n");
-        result.output.append(Utf8ToWide(stderrText));
+        result.output.append(Utf8ToWide(stderrCapture.text));
     }
-    if (stdoutTruncated || stderrTruncated) {
+    if (processControlError != ERROR_SUCCESS) {
+        result.output.append(L"\r\n\r\n[Job-Steuerung fehlgeschlagen: ")
+            .append(FormatSystemError(processControlError)).append(L"]\r\n");
+    }
+    if (stdoutCapture.error != ERROR_SUCCESS || stderrCapture.error != ERROR_SUCCESS) {
+        const auto pipeError = stdoutCapture.error != ERROR_SUCCESS
+                                   ? stdoutCapture.error
+                                   : stderrCapture.error;
+        result.output.append(L"\r\n\r\n[Pipe-Ausgabe konnte nicht vollständig gelesen werden: ")
+            .append(FormatSystemError(pipeError)).append(L"]\r\n");
+    }
+    if (stdoutCapture.truncated || stderrCapture.truncated) {
         result.output.append(L"\r\n\r\n[Ausgabe wurde bei 8 MiB gekürzt.]\r\n");
     }
     return result;
@@ -666,11 +749,39 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     HashBytes(hash, &value, sizeof(value));
 }
 
-[[nodiscard]] std::string CacheKey(const std::filesystem::path& modulePath) {
+[[nodiscard]] bool ShouldHashFileContents(const std::filesystem::path& path) {
+    auto extension = path.extension().wstring();
+    auto filename = path.filename().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), towlower);
+    std::transform(filename.begin(), filename.end(), filename.begin(), towlower);
+    return extension == L".vst3" || extension == L".dll" || filename == L"moduleinfo.json";
+}
+
+[[nodiscard]] bool HashFileContents(std::uint64_t& hash,
+                                    const std::filesystem::path& path,
+                                    const std::atomic_bool& stopRequested) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    std::vector<char> buffer(64U * 1024U);
+    while (input) {
+        if (stopRequested.load()) return false;
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto bytesRead = input.gcount();
+        if (bytesRead > 0) {
+            HashBytes(hash, buffer.data(), static_cast<std::size_t>(bytesRead));
+        }
+    }
+    return input.eof() && !input.bad();
+}
+
+[[nodiscard]] std::string CacheKey(const std::filesystem::path& modulePath,
+                                   const std::atomic_bool& stopRequested) {
     struct FileState {
+        std::filesystem::path sourcePath;
         std::wstring path;
         std::uintmax_t size = 0;
         std::int64_t modified = 0;
+        bool hashContents = false;
     };
 
     std::vector<FileState> files;
@@ -680,8 +791,8 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         if (error) return {};
         const auto size = std::filesystem::file_size(modulePath, error);
         if (error) return {};
-        files.push_back({NormalizedPathKey(modulePath), size,
-                         static_cast<std::int64_t>(modified.time_since_epoch().count())});
+        files.push_back({modulePath, NormalizedPathKey(modulePath), size,
+                         static_cast<std::int64_t>(modified.time_since_epoch().count()), true});
     } else {
         error.clear();
         if (!std::filesystem::is_directory(modulePath, error) || error) return {};
@@ -690,6 +801,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         const std::filesystem::recursive_directory_iterator end;
         if (error) return {};
         while (iterator != end) {
+            if (stopRequested.load()) return {};
             std::error_code typeError;
             if (iterator->is_regular_file(typeError) && !typeError) {
                 const auto size = iterator->file_size(typeError);
@@ -700,8 +812,9 @@ void HashValue(std::uint64_t& hash, const Value& value) {
                 if (typeError) return {};
                 auto relativeKey = relative.wstring();
                 std::transform(relativeKey.begin(), relativeKey.end(), relativeKey.begin(), towlower);
-                files.push_back({std::move(relativeKey), size,
-                                 static_cast<std::int64_t>(modified.time_since_epoch().count())});
+                files.push_back({iterator->path(), std::move(relativeKey), size,
+                                 static_cast<std::int64_t>(modified.time_since_epoch().count()),
+                                 ShouldHashFileContents(iterator->path())});
             }
             iterator.increment(error);
             if (error) return {};
@@ -712,12 +825,15 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         return left.path < right.path;
     });
     std::uint64_t hash = 14695981039346656037ULL;
+    static constexpr std::string_view algorithmMarker = "vst3-cache-content-v2";
+    HashBytes(hash, algorithmMarker.data(), algorithmMarker.size());
     const auto root = NormalizedPathKey(modulePath);
     HashBytes(hash, root.data(), root.size() * sizeof(wchar_t));
     for (const auto& file : files) {
         HashBytes(hash, file.path.data(), file.path.size() * sizeof(wchar_t));
         HashValue(hash, file.size);
         HashValue(hash, file.modified);
+        if (file.hashContents && !HashFileContents(hash, file.sourcePath, stopRequested)) return {};
     }
     std::ostringstream output;
     output << std::uppercase << std::hex << std::setfill('0') << std::setw(16) << hash;
@@ -757,10 +873,10 @@ void HashValue(std::uint64_t& hash, const Value& value) {
 }
 
 [[nodiscard]] bool TryLoadCachedProbe(const std::filesystem::path& modulePath,
+                                      std::string_view key,
                                       const ProbeCache& cache,
                                       ProbeRunResult& result) {
-    const auto key = CacheKey(modulePath);
-    const auto entry = cache.entries.find(key);
+    const auto entry = cache.entries.find(std::string(key));
     if (key.empty() || entry == cache.entries.end()) return false;
     const auto parsed = vst3scanner::ParseProbeResultJson(entry->second);
     if (!parsed.valid || (parsed.protocolStatus != "ok" && parsed.protocolStatus != "partial") ||
@@ -769,6 +885,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     }
 
     result.exitCode = 0;
+    result.processCompleted = true;
     result.protocolStatus = parsed.protocolStatus;
     result.status = L"Cachetreffer, Status: " + Utf8ToWide(parsed.protocolStatus);
     result.jsonOutput = entry->second;
@@ -777,11 +894,16 @@ void HashValue(std::uint64_t& hash, const Value& value) {
 }
 
 [[nodiscard]] bool PutCachedProbe(const std::filesystem::path& modulePath,
+                                  std::string_view key,
                                   std::string_view json,
                                   ProbeCache& cache) {
-    const auto key = CacheKey(modulePath);
     if (key.empty() || json.empty()) return false;
-    cache.entries[key] = std::string(json);
+    const auto parsed = vst3scanner::ParseProbeResultJson(json);
+    if (!parsed.valid ||
+        NormalizedPathKey(Utf8ToWide(parsed.modulePath)) != NormalizedPathKey(modulePath)) {
+        return false;
+    }
+    cache.entries[std::string(key)] = std::string(json);
     cache.dirty = true;
     return true;
 }
@@ -905,6 +1027,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     std::size_t retries = 0;
     std::size_t cacheHits = 0;
     bool cacheWriteFailed = false;
+    bool cacheFingerprintFailed = false;
 
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         if (state.stopRequested.load()) break;
@@ -912,7 +1035,12 @@ void HashValue(std::uint64_t& hash, const Value& value) {
                                    std::to_wstring(candidates.size()) + L"] " +
                                    candidates[index].filename().wstring();
         ProbeRunResult current;
-        if (useCache && TryLoadCachedProbe(candidates[index], cache, current)) {
+        const auto cacheKey = useCache ? CacheKey(candidates[index], state.stopRequested)
+                                       : std::string{};
+        if (state.stopRequested.load()) break;
+        if (useCache && cacheKey.empty()) cacheFingerprintFailed = true;
+        if (useCache && !cacheKey.empty() &&
+            TryLoadCachedProbe(candidates[index], cacheKey, cache, current)) {
             ++cacheHits;
             PublishProgress(window, state, progressLabel + L" - Cachetreffer");
         } else {
@@ -923,13 +1051,15 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         if (current.retried) ++retries;
         if (current.timedOut) ++timeouts;
         auto parsed = vst3scanner::ParseProbeResultJson(current.jsonOutput);
-        const bool succeeded = parsed.valid && current.exitCode == 0 && !current.timedOut &&
+        const bool succeeded = parsed.valid && current.processCompleted &&
+                               current.exitCode == 0 && !current.timedOut &&
                                (parsed.protocolStatus == "ok" ||
                                 parsed.protocolStatus == "partial");
         if (succeeded) {
             ++successful;
             if (useCache && !current.fromCache) {
-                cacheWriteFailed = !PutCachedProbe(candidates[index], current.jsonOutput, cache) ||
+                cacheWriteFailed = !PutCachedProbe(candidates[index], cacheKey,
+                                                   current.jsonOutput, cache) ||
                                    cacheWriteFailed;
             }
             for (auto& plugin : parsed.audioPlugins) {
@@ -943,7 +1073,9 @@ void HashValue(std::uint64_t& hash, const Value& value) {
             issue.status = !current.protocolStatus.empty()
                                ? current.protocolStatus
                                : (parsed.valid ? parsed.protocolStatus : "protocol_error");
-            issue.diagnostic = parsed.valid ? parsed.diagnostic : parsed.error;
+            issue.diagnostic = current.terminationIncomplete
+                                   ? WideToUtf8(current.output)
+                                   : (parsed.valid ? parsed.diagnostic : parsed.error);
             if (issue.diagnostic.empty()) issue.diagnostic = current.stderrOutput;
             if (issue.diagnostic.empty()) issue.diagnostic = WideToUtf8(current.output);
             issue.retried = current.retried;
@@ -981,6 +1113,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         if (cacheLoadResult == CacheLoadResult::Invalid) {
             result.status.append(L" (Datei war ungültig)");
         }
+        if (cacheFingerprintFailed) result.status.append(L" (Fingerprint fehlgeschlagen)");
         if (cacheWriteFailed) result.status.append(L" (Schreiben fehlgeschlagen)");
     } else {
         result.status.append(L", Cache: aus");
@@ -1078,6 +1211,11 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     return result;
 }
 
+[[nodiscard]] std::string ModuleFileName(std::string_view path) {
+    const auto separator = path.find_last_of("/\\");
+    return std::string(separator == std::string_view::npos ? path : path.substr(separator + 1U));
+}
+
 void SetListCell(HWND list, int row, int column, const std::wstring& value) {
     ListView_SetItemText(list, row, column, const_cast<wchar_t*>(value.c_str()));
 }
@@ -1094,15 +1232,17 @@ void PopulateResultsList(AppState& state) {
         ListView_InsertItem(state.resultList, &item);
         SetListCell(state.resultList, row, 1, Utf8ToWide(record.vendor));
         SetListCell(state.resultList, row, 2, Utf8ToWide(record.version));
-        SetListCell(state.resultList, row, 3, JoinedCategories(record.subCategories));
-        SetListCell(state.resultList, row, 4, Utf8ToWide(record.cid));
-        SetListCell(state.resultList, row, 5,
+        SetListCell(state.resultList, row, 3, Utf8ToWide(record.sdkVersion));
+        SetListCell(state.resultList, row, 4, JoinedCategories(record.subCategories));
+        SetListCell(state.resultList, row, 5, Utf8ToWide(ModuleFileName(record.modulePath)));
+        SetListCell(state.resultList, row, 6, Utf8ToWide(record.modulePath));
+        SetListCell(state.resultList, row, 7,
                     record.duplicate ? L"Ja (" + std::to_wstring(record.duplicateCount) + L")"
                                      : L"Nein");
-        SetListCell(state.resultList, row, 6, record.fromCache ? L"Ja" : L"Nein");
-        SetListCell(state.resultList, row, 7, Utf8ToWide(record.protocolStatus));
-        SetListCell(state.resultList, row, 8, Utf8ToWide(record.modulePath));
-        SetListCell(state.resultList, row, 9, Utf8ToWide(record.diagnostic));
+        SetListCell(state.resultList, row, 8, record.fromCache ? L"Ja" : L"Nein");
+        SetListCell(state.resultList, row, 9, Utf8ToWide(record.protocolStatus));
+        SetListCell(state.resultList, row, 10, std::to_wstring(record.probeDurationMs));
+        SetListCell(state.resultList, row, 11, Utf8ToWide(record.diagnostic));
         ++row;
     }
     for (const auto& issue : state.displayedIssues) {
@@ -1113,9 +1253,12 @@ void PopulateResultsList(AppState& state) {
         item.iItem = row;
         item.pszText = const_cast<wchar_t*>(name.c_str());
         ListView_InsertItem(state.resultList, &item);
-        SetListCell(state.resultList, row, 7, Utf8ToWide(issue.status));
-        SetListCell(state.resultList, row, 8, Utf8ToWide(issue.modulePath));
-        SetListCell(state.resultList, row, 9, Utf8ToWide(issue.diagnostic));
+        SetListCell(state.resultList, row, 5, filename);
+        SetListCell(state.resultList, row, 6, Utf8ToWide(issue.modulePath));
+        SetListCell(state.resultList, row, 7, L"Nein");
+        SetListCell(state.resultList, row, 8, L"Nein");
+        SetListCell(state.resultList, row, 9, Utf8ToWide(issue.status));
+        SetListCell(state.resultList, row, 11, Utf8ToWide(issue.diagnostic));
         ++row;
     }
 }
@@ -1125,17 +1268,19 @@ void PopulateResultsList(AppState& state) {
         case 0: return record.name;
         case 1: return record.vendor;
         case 2: return record.version;
-        case 3: {
+        case 3: return record.sdkVersion;
+        case 4: {
             std::string value;
             for (const auto& category : record.subCategories) value.append(category).push_back('|');
             return value;
         }
-        case 4: return record.cid;
-        case 5: return record.duplicate ? std::to_string(record.duplicateCount) : "0";
-        case 6: return record.fromCache ? "1" : "0";
-        case 7: return record.protocolStatus;
-        case 8: return record.modulePath;
-        case 9: return record.diagnostic;
+        case 5: return ModuleFileName(record.modulePath);
+        case 6: return record.modulePath;
+        case 7: return record.duplicate ? std::to_string(record.duplicateCount) : "0";
+        case 8: return record.fromCache ? "1" : "0";
+        case 9: return record.protocolStatus;
+        case 10: return std::to_string(record.probeDurationMs);
+        case 11: return record.diagnostic;
         default: return record.name;
     }
 }
@@ -1150,6 +1295,10 @@ void SortInventory(AppState& state, int column) {
     const bool ascending = state.sortAscending;
     std::stable_sort(state.displayedInventory.begin(), state.displayedInventory.end(),
                      [column, ascending](const auto& left, const auto& right) {
+                         if (column == 10 && left.probeDurationMs != right.probeDurationMs) {
+                             return ascending ? left.probeDurationMs < right.probeDurationMs
+                                              : left.probeDurationMs > right.probeDurationMs;
+                         }
                          const auto leftValue = SortValue(left, column);
                          const auto rightValue = SortValue(right, column);
                          const int comparison = _stricmp(leftValue.c_str(), rightValue.c_str());
@@ -1319,21 +1468,30 @@ void StartProbe(HWND window, AppState& state) {
                     const auto cacheLoadResult = useCache
                                                      ? LoadProbeCache(cache)
                                                      : CacheLoadResult::Missing;
-                    if (!useCache ||
-                        !TryLoadCachedProbe(std::filesystem::path(selectedPath), cache, runResult)) {
+                    const auto modulePath = std::filesystem::path(selectedPath);
+                    const auto cacheKey = useCache
+                                              ? CacheKey(modulePath, state.stopRequested)
+                                              : std::string{};
+                    if (state.stopRequested.load()) {
+                        runResult.stopped = true;
+                        runResult.status = L"Prüfung abgebrochen";
+                    } else if (!useCache || cacheKey.empty() ||
+                               !TryLoadCachedProbe(modulePath, cacheKey, cache, runResult)) {
                         runResult = RunProbeWithRetry(window, state, selectedPath, label);
                     }
                     auto parsed = vst3scanner::ParseProbeResultJson(runResult.jsonOutput);
-                    const bool succeeded = parsed.valid && runResult.exitCode == 0 &&
+                    const bool succeeded = parsed.valid && runResult.processCompleted &&
+                                           runResult.exitCode == 0 &&
                                            !runResult.timedOut &&
                                            (parsed.protocolStatus == "ok" ||
                                             parsed.protocolStatus == "partial");
                     if (succeeded) {
                         if (useCache && !runResult.fromCache) {
-                            const bool cached = PutCachedProbe(std::filesystem::path(selectedPath),
-                                                               runResult.jsonOutput, cache) &&
-                                                SaveProbeCache(cache);
-                            if (!cached) {
+                            if (cacheKey.empty()) {
+                                runResult.status.append(L", Cache-Fingerprint fehlgeschlagen");
+                            } else if (!PutCachedProbe(modulePath, cacheKey,
+                                                      runResult.jsonOutput, cache) ||
+                                       !SaveProbeCache(cache)) {
                                 runResult.status.append(L", Cache konnte nicht geschrieben werden");
                             } else if (cacheLoadResult == CacheLoadResult::Invalid) {
                                 runResult.status.append(L", Cachedatei wurde neu aufgebaut");
@@ -1351,7 +1509,9 @@ void StartProbe(HWND window, AppState& state) {
                                            ? runResult.protocolStatus
                                            : (parsed.valid ? parsed.protocolStatus
                                                            : "protocol_error");
-                        issue.diagnostic = parsed.valid ? parsed.diagnostic : parsed.error;
+                        issue.diagnostic = runResult.terminationIncomplete
+                                               ? WideToUtf8(runResult.output)
+                                               : (parsed.valid ? parsed.diagnostic : parsed.error);
                         if (issue.diagnostic.empty()) issue.diagnostic = runResult.stderrOutput;
                         if (issue.diagnostic.empty()) issue.diagnostic = WideToUtf8(runResult.output);
                         issue.retried = runResult.retried;
@@ -1449,9 +1609,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 int width;
             } columns[] = {
                 {L"Plugin", 180}, {L"Hersteller", 140}, {L"Version", 100},
-                {L"Kategorie", 140}, {L"CID", 250}, {L"Dublette", 80},
-                {L"Cache", 60}, {L"Status", 110}, {L"Modulpfad", 360},
-                {L"Diagnose", 300},
+                {L"SDK-Version", 100}, {L"Kategorie", 140}, {L"Modul", 220},
+                {L"Modulpfad", 360}, {L"Dublette", 80}, {L"Cache", 60},
+                {L"Status", 110}, {L"Dauer (ms)", 90}, {L"Diagnose", 300},
             };
             for (int index = 0; index < static_cast<int>(std::size(columns)); ++index) {
                 LVCOLUMNW column{};

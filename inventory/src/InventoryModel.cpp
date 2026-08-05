@@ -87,6 +87,11 @@ constexpr rapidjson::SizeType kMaximumProtocolClasses = 100000U;
     return result;
 }
 
+[[nodiscard]] std::string FileNameFromPath(std::string_view path) {
+    const auto separator = path.find_last_of("/\\");
+    return std::string(separator == std::string_view::npos ? path : path.substr(separator + 1U));
+}
+
 [[nodiscard]] std::string CsvEscape(std::string_view value) {
     if (value.find_first_of(";\",\r\n") == std::string_view::npos) {
         return std::string(value);
@@ -126,7 +131,7 @@ ParsedProbeResult ParseProbeResultJson(std::string_view json) {
     }
 
     const auto* schemaVersion = Member(document, "schemaVersion");
-    if (schemaVersion == nullptr || !schemaVersion->IsInt() || schemaVersion->GetInt() != 1) {
+    if (schemaVersion == nullptr || !schemaVersion->IsInt() || schemaVersion->GetInt() != 2) {
         result.error = "Unsupported or missing schemaVersion.";
         return result;
     }
@@ -249,7 +254,7 @@ ParsedProbeCache ParseProbeCacheJson(std::string_view json) {
         return result;
     }
     const auto* schemaVersion = Member(document, "schemaVersion");
-    if (schemaVersion == nullptr || !schemaVersion->IsInt() || schemaVersion->GetInt() != 1) {
+    if (schemaVersion == nullptr || !schemaVersion->IsInt() || schemaVersion->GetInt() != 2) {
         result.error = "Unsupported or missing cache schemaVersion.";
         return result;
     }
@@ -293,7 +298,7 @@ std::string SerializeProbeCacheJson(const std::vector<ProbeCacheEntry>& entries)
         return left.key < right.key;
     });
     std::ostringstream output;
-    output << "{\"schemaVersion\":1,\"entries\":[";
+    output << "{\"schemaVersion\":2,\"entries\":[";
     for (std::size_t index = 0; index < sorted.size(); ++index) {
         if (index != 0) output << ',';
         output << "{\"key\":";
@@ -320,18 +325,24 @@ void MarkCidDuplicates(std::vector<InventoryRecord>& records) {
 std::string SerializeInventoryCsv(const std::vector<InventoryRecord>& records,
                                   const std::vector<ScanIssue>& issues) {
     std::ostringstream output;
-    output << "Hersteller;Plugin;Version;Kategorie;CID;Modulpfad;Dublette;Cache;Status;Diagnose\r\n";
+    output << "Plugin;Hersteller;Version;SDK-Version;Kategorie;Modul;Modulpfad;"
+              "Dublette;Cache;Status;Dauer (ms);Diagnose\r\n";
     for (const auto& record : records) {
-        output << CsvEscape(record.vendor) << ';' << CsvEscape(record.name) << ';'
-               << CsvEscape(record.version) << ';' << CsvEscape(Join(record.subCategories, '|'))
-               << ';' << CsvEscape(record.cid) << ';' << CsvEscape(record.modulePath) << ';'
+        output << CsvEscape(record.name) << ';' << CsvEscape(record.vendor) << ';'
+               << CsvEscape(record.version) << ';' << CsvEscape(record.sdkVersion) << ';'
+               << CsvEscape(Join(record.subCategories, '|')) << ';'
+               << CsvEscape(FileNameFromPath(record.modulePath)) << ';'
+               << CsvEscape(record.modulePath) << ';'
                << (record.duplicate ? "ja (" + std::to_string(record.duplicateCount) + ')' : "nein")
                << ';' << (record.fromCache ? "ja" : "nein") << ';'
-               << CsvEscape(record.protocolStatus) << ';' << CsvEscape(record.diagnostic) << "\r\n";
+               << CsvEscape(record.protocolStatus) << ';' << record.probeDurationMs << ';'
+               << CsvEscape(record.diagnostic) << "\r\n";
     }
     for (const auto& issue : issues) {
-        output << ";;;;;" << CsvEscape(issue.modulePath) << ";nein;nein;"
-               << CsvEscape(issue.status) << ';' << CsvEscape(issue.diagnostic) << "\r\n";
+        const auto module = FileNameFromPath(issue.modulePath);
+        output << CsvEscape("[Problem] " + module) << ";;;;;" << CsvEscape(module) << ';'
+               << CsvEscape(issue.modulePath) << ";nein;nein;" << CsvEscape(issue.status)
+               << ";;" << CsvEscape(issue.diagnostic) << "\r\n";
     }
     return output.str();
 }

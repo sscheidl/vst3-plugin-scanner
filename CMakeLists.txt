@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vst3PluginScannerPoc VERSION 2.2.3 LANGUAGES CXX)
+project(Vst3PluginScannerPoc VERSION 2.3.0 LANGUAGES CXX)
 
 include(CTest)
 
