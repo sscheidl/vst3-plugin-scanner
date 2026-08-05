@@ -1,134 +1,142 @@
-# Windows VST Plugin Scanner
+# VST3 Plugin Scanner for Windows
 
-Native Windows application for scanning installed VST2, VST3, CLAP and AAX plugins without loading or initializing plugin binaries.
+Technische Machbarkeitsstudie für einen zuverlässigen, nativen VST3-Inventarscanner.
+Der Neustart verwendet das offizielle Steinberg VST3 SDK und behandelt ein VST3-Modul
+als Container für null, eine oder mehrere exportierte Factory-Klassen.
 
-## Features
+Der vorherige passive C++-Scanner ist unverändert über den Tag
+`cpp-v1.1.0-pre-restart` verfügbar. Seine Heuristiken und Windows-Dateiversionen
+fließen nicht in die Ergebnisse dieser Studie ein.
 
-- Win32 GUI with Start/Stop scan buttons.
-- Separate Export button; reports are written only after a completed scan and explicit export action.
-- VST2, VST3, CLAP, AAX and custom scan path selectors.
-- Worker-thread scan so the GUI stays responsive.
-- Stop flag for cancellable scans.
-- Progress bar, status output, log output and result preview table.
-- Resizable/maximizable window and sortable result table.
-- Recursive scan for:
-  - VST2: `*.dll`
-  - VST3: `*.vst3` files and `.vst3` bundle directories
-  - CLAP: `*.clap`
-  - AAX: `*.aaxplugin` bundle directories
-- Metadata from Windows version resources:
-  - `FileDescription`
-  - `ProductName`
-  - `CompanyName`
-  - `FileVersion`
-  - `ProductVersion`
-- Deterministic version-source priority and visible provenance:
-  - VST3 `moduleinfo.json`
-  - Windows `ProductVersion`
-  - Windows `FileVersion`
-  - numeric `VS_FIXEDFILEINFO`
-  - conservative filename fallback
-- Numeric version normalization/comparison (`1.10` sorts after `1.9`).
-- Scan summary counts reliable, heuristic and missing versions separately.
-- Conservative fallback to filename/folder name when metadata is missing.
-- Conservative local category inference for common plugin types such as Instrument, Reverb, Compressor, EQ, Delay and Metering.
-- Duplicate detection for possible cross-format pairs.
-- Duplicate detection is intentionally cross-format only; same-format duplicates are kept visible as separate installs.
-- Duplicate summaries distinguish groups, marked entries, and VST2 entries that can be deleted by the cleanup action.
-- Reports:
-  - HTML
-  - CSV with UTF-8 BOM and semicolon separator
-  - TXT
+## Aktueller Stand: Inventar und optionaler Cache (2.2.3)
 
-## Default Paths
-
-- VST2: `C:\Program Files\Vstplugins`
-- VST3: `C:\Program Files\Common Files\VST3`
-- CLAP: `C:\Program Files\Common Files\CLAP`
-- AAX: `C:\Program Files\Common Files\Avid\Audio\Plug-Ins`
-
-## Build With Visual Studio
-
-1. Open `VstPluginScanner.sln` in Visual Studio 2022.
-2. Select `Release` and `x64`.
-3. Build the solution.
-4. The executable is created under:
+Der Branch baut eine isolierte x64-Metadatenprobe und eine native Win32-GUI:
 
 ```text
-x64\Release\VstPluginScanner.exe
+Vst3MetadataProbe.exe "C:\Pfad\Plugin.vst3"
+Vst3ProbeGui.exe
 ```
 
-The project uses the Visual Studio 2022 `v143` toolset, C++20 and the Windows 10/11 SDK.
-The executable embeds Windows version information `1.1.0.0`.
+Die GUI scannt einzelne Module oder komplette Ordner. `.vst3`-Bundle-Verzeichnisse
+werden vom Ordnerscan automatisch als einzelne Module erkannt. Jeder nicht
+zwischengespeicherte Kandidat laeuft in einem eigenen Probe-Prozess. Der erste
+Versuch ist auf 15 Sekunden begrenzt; nur nach Timeout folgt genau eine
+Wiederholung mit maximal 30 Sekunden.
 
-Or run:
+Version 2.2.3 bietet:
+
+- strikte Validierung des JSON-Protokolls und `protocol_error` bei leerer Ausgabe;
+- eine sortierbare Tabelle fuer `Audio Module Class`-Eintraege;
+- CID-basierte Dublettenerkennung ueber verschiedene Modulpfade;
+- einen standardmaessig deaktivierten, optionalen Einzeldatei-Cache
+  `vst3_scanner_cache.json` neben der EXE;
+- statisch eingebundene MSVC-Runtimes fuer eine portable Release-Ausgabe;
+- CSV-Export mit UTF-8-BOM und Semikolon;
+- strukturierten JSON-Export;
+- Problemzeilen fuer Ladefehler, `no_classes`, Timeouts und Dateisystemwarnungen.
+- eingeschraenkte Handle-Vererbung sowie eigene Diagnosen fuer abgestuerzte Probes.
+
+Controller-, Compatibility- und ARA-Hilfsklassen werden nicht als Plugins gezaehlt.
+Ein leerer Klassenhersteller darf ausschliesslich durch den Hersteller derselben
+VST3-Factory ersetzt werden. Versionswerte werden nie heuristisch veraendert.
+
+Die Probe:
+
+- untersucht genau ein Modul pro Prozess;
+- laedt das Modul mit Steinbergs offiziellem Windows-Hosting-Loader;
+- ruft nur die Plugin-Factory und deren Metadaten ab;
+- verwendet `IPluginFactory3`, ersatzweise `IPluginFactory2`, ersatzweise `IPluginFactory`;
+- erzeugt keine Plugininstanz und ruft weder `initialize` noch Audio- oder GUI-Funktionen auf;
+- gibt genau ein UTF-8-JSON-Dokument auf `stdout` aus;
+- schreibt Diagnosen ausschliesslich auf `stderr`;
+- laesst leere oder ungewoehnliche Versionsstrings unveraendert sichtbar.
+
+Zur Ausfuehrung werden weder das Steinberg VST3 SDK noch das Microsoft Visual C++
+Redistributable benoetigt. `Vst3ProbeGui.exe` und `Vst3MetadataProbe.exe` muessen
+gemeinsam im selben Verzeichnis bleiben.
+
+Weitere GUI- und Cache-Details stehen in
+[`docs/RUDIMENTARY_GUI.md`](docs/RUDIMENTARY_GUI.md).
+## Voraussetzungen
+
+- Windows 10 oder Windows 11 x64
+- Visual Studio 2022 Build Tools mit MSVC v143 und Windows SDK
+- CMake 3.25 oder neuer
+- Git mit Submodule-Unterstützung
+
+Das SDK ist als rekursives Git-Submodule eingebunden und auf
+`v3.8.0_build_66` (`9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`) fixiert.
+
+## Sauberer Checkout
 
 ```powershell
-.\build_release.ps1
+git clone --recurse-submodules https://github.com/sscheidl/vst3-plugin-scanner.git
+cd vst3-plugin-scanner
 ```
 
-## Build With CMake
-
-If CMake is installed:
+Bei einem bereits vorhandenen Checkout:
 
 ```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
+git submodule update --init --recursive
+```
+
+## Build
+
+```powershell
+cmake -S . -B build -A x64 -DBUILD_TESTING=ON
+cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The executable is created under:
+Ergebnis:
 
 ```text
-build\Release\VstPluginScanner.exe
+build\bin\Release\Vst3MetadataProbe.exe
+build\bin\Release\Vst3ProbeGui.exe
 ```
 
-## Safety Notes
+Beide EXE-Dateien müssen im selben Verzeichnis bleiben. Weitere Details stehen in
+[`docs/RUDIMENTARY_GUI.md`](docs/RUDIMENTARY_GUI.md).
 
-- Plugin DLLs are never loaded with `LoadLibrary` in the scanner process.
-- The scanner reads only filesystem metadata and Windows version resources.
-- A scan never changes plug-in files. Explicit cleanup commands move selected files to the Windows Recycle Bin after confirmation.
-- No registry write access is used.
-- Access-denied and broken files are logged and skipped safely.
+## Prozessprotokoll
 
-## Steinberg VST3 SDK Preparation
+Das JSON-Schema hat aktuell Version `1`. Eine erfolgreiche Antwort enthält
+Moduldaten sowie einen Eintrag für jeden von der Factory gemeldeten Klassenindex.
+Wichtige unverfälschte Felder sind `version` und `sdkVersion`; intern heißen sie
+`ClassVersionRaw` und `SdkVersionRaw`.
 
-- The official SDK is available at `https://github.com/steinbergmedia/vst3sdk` under the MIT license.
-- `IVst3SdkProbe` is the integration seam for a future SDK-backed helper.
-- The current implementation is a disabled stub and does not load plug-ins.
-- Any future SDK probe must run out of process with timeout/crash isolation.
-- CMake can validate a recursive SDK checkout without enabling plug-in loading:
-
-```powershell
-cmake -S . -B build -A x64 `
-  -DVST3_SCANNER_PREPARE_STEINBERG_SDK=ON `
-  -DVST3_SDK_ROOT=C:\path\to\vst3sdk
+```json
+{
+  "schemaVersion": 1,
+  "status": "ok",
+  "module": {
+    "path": "C:\\Program Files\\Common Files\\VST3\\Example.vst3",
+    "factoryVendor": "Example Audio",
+    "classCount": 1,
+    "probeDurationMs": 12
+  },
+  "classes": [
+    {
+      "index": 0,
+      "cid": "00112233445566778899AABBCCDDEEFF",
+      "category": "Audio Module Class",
+      "name": "Example",
+      "vendor": "Example Audio",
+      "version": "2.4.1",
+      "sdkVersion": "VST 3.7.9",
+      "factoryInterface": 3,
+      "isAudioPlugin": true,
+      "versionMissing": false
+    }
+  ],
+  "diagnostic": ""
+}
 ```
 
-See `docs/VST3_SDK_INTEGRATION.md` for the integration plan.
+Die vollständige Feld- und Statusbeschreibung steht in
+[`docs/PHASE_1_PROBE.md`](docs/PHASE_1_PROBE.md).
 
-## Project Structure
+## Lizenz
 
-```text
-include/
-  DuplicateDetector.h
-  MetadataReader.h
-  PluginRecord.h
-  ReportWriter.h
-  ScannerEngine.h
-  StringUtil.h
-  VersionUtil.h
-  Vst3SdkProbe.h
-src/
-  DuplicateDetector.cpp
-  MetadataReader.cpp
-  ReportWriter.cpp
-  ScannerEngine.cpp
-  StringUtil.cpp
-  VersionUtil.cpp
-  Vst3SdkProbeStub.cpp
-  main.cpp
-tests/
-  MetadataReaderTests.cpp
-  VersionUtilTests.cpp
-```
+Die SDK-Quellen bleiben im offiziellen Steinberg-Submodule und unterliegen dessen
+Lizenzdateien. Der Scanner kopiert oder verändert keine Plugin-Dateien.
