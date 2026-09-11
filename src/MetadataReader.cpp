@@ -434,13 +434,7 @@ std::wstring MatchKnownVendor(const std::wstring& pluginName, const std::wstring
 }
 
 std::wstring InferManufacturerFromPath(const std::filesystem::path& pluginPath) {
-    std::filesystem::path current = pluginPath;
-    if (ToLower(current.extension().wstring()) == L".vst3" ||
-        ToLower(current.extension().wstring()) == L".aaxplugin") {
-        current = current.parent_path();
-    } else {
-        current = current.parent_path();
-    }
+    std::filesystem::path current = pluginPath.parent_path();
 
     for (int depth = 0; depth < 3 && !current.empty(); ++depth) {
         const std::wstring folder = current.filename().wstring();
@@ -542,7 +536,7 @@ PluginRecord MetadataReader::ReadPlugin(const std::filesystem::path& pluginPath,
     const bool isDirectory = std::filesystem::is_directory(pluginPath, ec);
     if (ec) {
         record.status = ScanStatus::AccessError;
-        record.warningMessage = L"Pfad konnte nicht gelesen werden: " + Utf8ToWide(ec.message());
+        SetWarning(record, WarningCode::PathNotReadable, Utf8ToWide(ec.message()));
         return record;
     }
 
@@ -552,15 +546,15 @@ PluginRecord MetadataReader::ReadPlugin(const std::filesystem::path& pluginPath,
         record.fileSize = std::filesystem::file_size(pluginPath, ec);
         if (ec) {
             record.fileSize = 0;
-            record.warningMessage = L"Dateigroesse konnte nicht gelesen werden: " + Utf8ToWide(ec.message());
+            SetWarning(record, WarningCode::FileSizeNotReadable, Utf8ToWide(ec.message()));
         }
     }
 
     const auto modified = std::filesystem::last_write_time(pluginPath, ec);
     if (!ec) {
         record.modifiedDate = FormatFileTime(modified);
-    } else if (record.warningMessage.empty()) {
-        record.warningMessage = L"Aenderungsdatum konnte nicht gelesen werden: " + Utf8ToWide(ec.message());
+    } else if (record.warningCode == WarningCode::None) {
+        SetWarning(record, WarningCode::ModifiedDateNotReadable, Utf8ToWide(ec.message()));
     }
 
     Vst3SdkProbeResult sdkInfo;
@@ -628,16 +622,16 @@ PluginRecord MetadataReader::ReadPlugin(const std::filesystem::path& pluginPath,
         record.status = ScanStatus::Recognized;
     } else if (hasName || hasManufacturer || hasVersion) {
         record.status = ScanStatus::PartiallyRecognized;
-        if (record.warningMessage.empty()) {
-            record.warningMessage = record.versionSource == VersionSource::FileName
-                ? L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt."
-                : L"Nicht alle Metadaten konnten zuverlaessig ermittelt werden.";
+        if (record.warningCode == WarningCode::None) {
+            SetWarning(record, record.versionSource == VersionSource::FileName
+                ? WarningCode::HeuristicVersionFromFileName
+                : WarningCode::IncompleteMetadata);
         }
     } else {
         record.status = ScanStatus::Unknown;
         record.pluginName = StemName(pluginPath);
-        if (record.warningMessage.empty()) {
-            record.warningMessage = L"Keine Windows-Versioninformationen gefunden.";
+        if (record.warningCode == WarningCode::None) {
+            SetWarning(record, WarningCode::NoWindowsVersionInfo);
         }
     }
 

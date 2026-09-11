@@ -90,6 +90,9 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <Manifest Include="VstPluginScanner.manifest" />
+  </ItemGroup>
+  <ItemGroup>
     <ResourceCompile Include="VstPluginScanner.rc" />
   </ItemGroup>
   <ItemGroup>

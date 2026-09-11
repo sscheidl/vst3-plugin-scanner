@@ -109,9 +109,16 @@ std::wstring HtmlEscape(const std::wstring& value) {
 }
 
 std::wstring CsvEscape(const std::wstring& value) {
-    bool needsQuotes = false;
+    // Spreadsheets treat a leading =, +, - or @ as a formula. Neutralize it so a
+    // crafted plug-in name in a metadata resource cannot become executable content.
+    const bool needsFormulaGuard = !value.empty() &&
+        (value.front() == L'=' || value.front() == L'+' ||
+         value.front() == L'-' || value.front() == L'@');
+
+    bool needsQuotes = needsFormulaGuard;
     for (wchar_t c : value) {
-        if (c == L';' || c == L',' || c == L'"' || c == L'\r' || c == L'\n') {
+        if (c == L';' || c == L',' || c == L'"' || c == L'\r' || c == L'\n' ||
+            c == L'\t') {
             needsQuotes = true;
             break;
         }
@@ -121,6 +128,9 @@ std::wstring CsvEscape(const std::wstring& value) {
     }
 
     std::wstring result = L"\"";
+    if (needsFormulaGuard) {
+        result.push_back(L'\'');
+    }
     for (wchar_t c : value) {
         if (c == L'"') {
             result += L"\"\"";

@@ -24,6 +24,7 @@ add_executable(VstPluginScanner WIN32
     src/Vst3SdkProbeStub.cpp
     src/main.cpp
     VstPluginScanner.rc
+    VstPluginScanner.manifest
 )
 
 target_include_directories(VstPluginScanner PRIVATE include)

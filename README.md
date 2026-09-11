@@ -12,7 +12,7 @@ Native Windows application for scanning installed VST2, VST3, CLAP and AAX plugi
 - Progress bar, status output, log output and result preview table.
 - Resizable/maximizable window and sortable result table.
 - Recursive scan for:
-  - VST2: `*.dll`
+  - VST2: `*.dll` exporting `VSTPluginMain`, or legacy `main` without COM registration exports
   - VST3: `*.vst3` files and `.vst3` bundle directories
   - CLAP: `*.clap`
   - AAX: `*.aaxplugin` bundle directories
@@ -37,7 +37,7 @@ Native Windows application for scanning installed VST2, VST3, CLAP and AAX plugi
 - Duplicate summaries distinguish groups, marked entries, and VST2 entries that can be deleted by the cleanup action.
 - Reports:
   - HTML
-  - CSV with UTF-8 BOM and semicolon separator
+  - CSV with UTF-8 BOM, semicolon separator and neutralized leading `=`, `+`, `-`, `@`
   - TXT
 
 ## Default Paths
@@ -59,7 +59,7 @@ x64\Release\VstPluginScanner.exe
 ```
 
 The project uses the Visual Studio 2022 `v143` toolset, C++20 and the Windows 10/11 SDK.
-The executable embeds Windows version information `1.1.0.0`.
+The executable embeds Windows version information `1.2.0.0` and an application manifest (ComCtl32 v6, long path aware).
 
 Or run:
 
@@ -87,7 +87,7 @@ build\Release\VstPluginScanner.exe
 
 - Plugin DLLs are never loaded with `LoadLibrary` in the scanner process.
 - The scanner reads only filesystem metadata and Windows version resources.
-- A scan never changes plug-in files. Explicit cleanup commands move selected files to the Windows Recycle Bin after confirmation.
+- A scan never changes plug-in files. Explicit cleanup commands move selected files to the Windows Recycle Bin after confirmation, using `IFileOperation` with `FOFX_RECYCLEONDELETE` so that an item that cannot be recycled fails instead of being deleted permanently.
 - No registry write access is used.
 - Access-denied and broken files are logged and skipped safely.
 
@@ -106,6 +106,15 @@ cmake -S . -B build -A x64 `
 ```
 
 See `docs/VST3_SDK_INTEGRATION.md` for the integration plan.
+
+## Rules File
+
+`plugin_rules_userprefs.json` holds vendor aliases, vendor rules, plug-in rules
+and manual overrides. The GUI resolves its location once - next to the
+executable, in the working directory, or two levels above a `Debug`/`Release`
+output folder - and the scan applies exactly that file, so editing, saving and
+applying never diverge. Saving overrides rewrites only the `pluginRules` member
+and keeps the rest of the file byte for byte, after writing a timestamped backup.
 
 ## Project Structure
 
