@@ -23,7 +23,7 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"Vst3ProbeGuiWindow";
-constexpr wchar_t kWindowTitle[] = L"VST3 Plugin Scanner 2.3.0";
+constexpr wchar_t kWindowTitle[] = L"VST3 Plugin Scanner 2.4.0";
 constexpr UINT kProbeDoneMessage = WM_APP + 1;
 constexpr UINT kProgressMessage = WM_APP + 3;
 constexpr DWORD kInitialProbeTimeoutMs = 15'000;
@@ -185,7 +185,7 @@ private:
         0,
         nullptr);
     std::wstring message = length != 0 && buffer != nullptr ? std::wstring(buffer, length)
-                                                              : L"Unbekannter Windows-Fehler";
+                                                              : L"Unknown Windows error";
     if (buffer != nullptr) {
         LocalFree(buffer);
     }
@@ -219,7 +219,7 @@ private:
                                      static_cast<int>(value.size()), nullptr, 0);
     }
     if (length == 0) {
-        return L"[UTF-8-Ausgabe konnte nicht dekodiert werden]";
+        return L"[UTF-8 output could not be decoded]";
     }
     std::wstring result(static_cast<std::size_t>(length), L'\0');
     MultiByteToWideChar(CP_UTF8, flags, value.data(), static_cast<int>(value.size()),
@@ -406,8 +406,8 @@ void RequestStop(AppState& state) {
     std::error_code probePathError;
     if (probePath.empty() || !std::filesystem::exists(probePath, probePathError) ||
         probePathError) {
-        result.status = L"Probe nicht gefunden";
-        result.output = L"Vst3MetadataProbe.exe muss im selben Verzeichnis wie die GUI liegen.";
+        result.status = L"Probe not found";
+        result.output = L"Vst3MetadataProbe.exe must be in the same directory as the GUI.";
         return result;
     }
 
@@ -423,7 +423,7 @@ void RequestStop(AppState& state) {
         if (stdoutWriteRaw != nullptr) CloseHandle(stdoutWriteRaw);
         if (stderrReadRaw != nullptr) CloseHandle(stderrReadRaw);
         if (stderrWriteRaw != nullptr) CloseHandle(stderrWriteRaw);
-        result.status = L"Pipe-Fehler";
+        result.status = L"Pipe error";
         result.output = FormatSystemError(error);
         return result;
     }
@@ -434,7 +434,7 @@ void RequestStop(AppState& state) {
     UniqueHandle stderrWrite(stderrWriteRaw);
     if (!SetHandleInformation(stdoutRead.Get(), HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(stderrRead.Get(), HANDLE_FLAG_INHERIT, 0)) {
-        result.status = L"Pipe-Fehler";
+        result.status = L"Pipe error";
         result.output = FormatSystemError(GetLastError());
         return result;
     }
@@ -443,7 +443,7 @@ void RequestStop(AppState& state) {
                                        &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     UniqueHandle job(CreateJobObjectW(nullptr, nullptr));
     if (!job) {
-        result.status = L"Job-Object-Fehler";
+        result.status = L"Job object error";
         result.output = FormatSystemError(GetLastError());
         return result;
     }
@@ -451,7 +451,7 @@ void RequestStop(AppState& state) {
     jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(job.Get(), JobObjectExtendedLimitInformation, &jobLimits,
                                  sizeof(jobLimits))) {
-        result.status = L"Job-Object-Fehler";
+        result.status = L"Job object error";
         result.output = FormatSystemError(GetLastError());
         return result;
     }
@@ -462,7 +462,7 @@ void RequestStop(AppState& state) {
     SIZE_T attributeBytes = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
     if (attributeBytes == 0) {
-        result.status = L"Prozessisolierung konnte nicht vorbereitet werden";
+        result.status = L"Process isolation could not be prepared";
         result.output = FormatSystemError(GetLastError());
         return result;
     }
@@ -470,7 +470,7 @@ void RequestStop(AppState& state) {
     auto* attributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
         attributeStorage.data());
     if (!InitializeProcThreadAttributeList(attributeList, 1, 0, &attributeBytes)) {
-        result.status = L"Prozessisolierung konnte nicht vorbereitet werden";
+        result.status = L"Process isolation could not be prepared";
         result.output = FormatSystemError(GetLastError());
         return result;
     }
@@ -482,7 +482,7 @@ void RequestStop(AppState& state) {
             inheritedHandles.data(), inheritedHandles.size() * sizeof(HANDLE), nullptr, nullptr)) {
         const auto error = GetLastError();
         DeleteProcThreadAttributeList(attributeList);
-        result.status = L"Prozessisolierung konnte nicht eingerichtet werden";
+        result.status = L"Process isolation could not be configured";
         result.output = FormatSystemError(error);
         return result;
     }
@@ -503,7 +503,7 @@ void RequestStop(AppState& state) {
     const auto createError = created ? ERROR_SUCCESS : GetLastError();
     DeleteProcThreadAttributeList(attributeList);
     if (!created) {
-        result.status = L"Probe konnte nicht gestartet werden";
+        result.status = L"Probe could not be started";
         result.output = FormatSystemError(createError);
         return result;
     }
@@ -514,7 +514,7 @@ void RequestStop(AppState& state) {
         const auto error = GetLastError();
         TerminateProcess(process.Get(), kStoppedExitCode);
         WaitForSingleObject(process.Get(), 5'000);
-        result.status = L"Probe konnte nicht isoliert werden";
+        result.status = L"Probe could not be isolated";
         result.output = FormatSystemError(error);
         return result;
     }
@@ -527,7 +527,7 @@ void RequestStop(AppState& state) {
         const auto error = GetLastError();
         TerminateJobObject(job.Get(), error);
         WaitForSingleObject(process.Get(), 5'000);
-        result.status = L"Probe-Thread konnte nicht gestartet werden";
+        result.status = L"Probe thread could not be started";
         result.output = FormatSystemError(error);
         return result;
     }
@@ -616,37 +616,37 @@ void RequestStop(AppState& state) {
     result.stopped = stopped;
     if (terminationIncomplete) {
         result.protocolStatus = timedOut ? "timeout" : "protocol_error";
-        result.status = L"Probe-Prozess konnte nicht vollständig beendet werden";
-        result.output = L"Der Scan wurde nach fünf Sekunden fortgesetzt; der isolierte Job wird beim Schließen des Handles erneut beendet.";
+        result.status = L"Probe process could not be terminated completely";
+        result.output = L"The scan continued after five seconds; the isolated job is terminated again when its handle closes.";
     } else if (timedOut) {
         result.protocolStatus = "timeout";
-        result.status = L"Timeout nach " + std::to_wstring(timeoutMs / 1'000) + L" Sekunden";
+        result.status = L"Timeout after " + std::to_wstring(timeoutMs / 1'000) + L" seconds";
     } else if (waitFailed) {
-        result.status = L"Warten auf Probe fehlgeschlagen: " + FormatSystemError(waitError);
+        result.status = L"Waiting for the probe failed: " + FormatSystemError(waitError);
     } else if (stopped) {
-        result.status = L"Prüfung abgebrochen";
+        result.status = L"Scan cancelled";
     } else if (!exitCodeAvailable) {
         result.protocolStatus = "protocol_error";
-        result.status = L"Exitcode der Probe konnte nicht gelesen werden";
+        result.status = L"Probe exit code could not be read";
         result.output = FormatSystemError(GetLastError());
     } else {
         const auto parsed = vst3scanner::ParseProbeResultJson(stdoutCapture.text);
         result.protocolStatus = parsed.valid ? parsed.protocolStatus : "protocol_error";
         if (!parsed.valid && IsCrashExitCode(result.exitCode)) {
             result.protocolStatus = "crashed";
-            result.status = L"Probe abgestürzt, Exitcode " + FormatExitCode(result.exitCode);
-            result.output = L"Der isolierte Probe-Prozess wurde durch eine Windows-Ausnahme beendet.";
+            result.status = L"Probe crashed, exit code " + FormatExitCode(result.exitCode);
+            result.output = L"The isolated probe process was terminated by a Windows exception.";
         } else if (parsed.valid && result.exitCode != 0 &&
                    (parsed.protocolStatus == "ok" || parsed.protocolStatus == "partial")) {
             result.protocolStatus = IsCrashExitCode(result.exitCode) ? "crashed" : "protocol_error";
-            result.status = L"Widersprüchliches Probe-Ergebnis, Exitcode " +
+            result.status = L"Inconsistent probe result, exit code " +
                             FormatExitCode(result.exitCode);
-            result.output = L"Die Probe meldete Erfolg, wurde aber nicht erfolgreich beendet.";
+            result.output = L"The probe reported success but did not exit successfully.";
         } else {
-            result.status = L"Probe beendet, Exitcode " + std::to_wstring(result.exitCode) +
-                            L", Status: " + Utf8ToWide(result.protocolStatus);
+            result.status = L"Probe finished, exit code " + std::to_wstring(result.exitCode) +
+                            L", status: " + Utf8ToWide(result.protocolStatus);
             if (!parsed.valid) {
-                result.output = L"Ungültige Probe-Antwort: " + Utf8ToWide(parsed.error);
+                result.output = L"Invalid probe response: " + Utf8ToWide(parsed.error);
             }
         }
     }
@@ -654,25 +654,25 @@ void RequestStop(AppState& state) {
     if (!stdoutCapture.text.empty() && result.output.empty()) {
         result.output = Utf8ToWide(PrettyPrintJson(stdoutCapture.text));
     } else if (result.output.empty()) {
-        result.output = L"Die Probe hat keine JSON-Ausgabe geliefert.";
+        result.output = L"The probe produced no JSON output.";
     }
     if (!stderrCapture.text.empty()) {
-        result.output.append(L"\r\n\r\n--- Diagnose (stderr) ---\r\n");
+        result.output.append(L"\r\n\r\n--- Diagnostics (stderr) ---\r\n");
         result.output.append(Utf8ToWide(stderrCapture.text));
     }
     if (processControlError != ERROR_SUCCESS) {
-        result.output.append(L"\r\n\r\n[Job-Steuerung fehlgeschlagen: ")
+        result.output.append(L"\r\n\r\n[Job control failed: ")
             .append(FormatSystemError(processControlError)).append(L"]\r\n");
     }
     if (stdoutCapture.error != ERROR_SUCCESS || stderrCapture.error != ERROR_SUCCESS) {
         const auto pipeError = stdoutCapture.error != ERROR_SUCCESS
                                    ? stdoutCapture.error
                                    : stderrCapture.error;
-        result.output.append(L"\r\n\r\n[Pipe-Ausgabe konnte nicht vollständig gelesen werden: ")
+        result.output.append(L"\r\n\r\n[Pipe output could not be read completely: ")
             .append(FormatSystemError(pipeError)).append(L"]\r\n");
     }
     if (stdoutCapture.truncated || stderrCapture.truncated) {
-        result.output.append(L"\r\n\r\n[Ausgabe wurde bei 8 MiB gekürzt.]\r\n");
+        result.output.append(L"\r\n\r\n[Output was truncated at 8 MiB.]\r\n");
     }
     return result;
 }
@@ -706,20 +706,20 @@ void PublishProgress(HWND window, AppState& state, std::wstring message) {
                                                const std::wstring& pluginPath,
                                                const std::wstring& progressLabel) {
     const auto label = progressLabel.empty() ? L"Probe" : progressLabel;
-    PublishProgress(window, state, label + L" - erster Versuch: maximal 15 Sekunden ...");
+    PublishProgress(window, state, label + L" - first attempt: up to 15 seconds ...");
     auto result = RunProbeAttempt(state, pluginPath, kInitialProbeTimeoutMs);
     if (!result.timedOut || state.stopRequested.load()) {
         return result;
     }
 
-    PublishProgress(window, state, label + L" - Timeout, Wiederholung: maximal 30 Sekunden ...");
+    PublishProgress(window, state, label + L" - timeout, retry: up to 30 seconds ...");
     auto retry = RunProbeAttempt(state, pluginPath, kRetryProbeTimeoutMs);
     retry.retried = true;
-    retry.output.insert(0, L"[Erster Versuch nach 15 Sekunden abgebrochen; einmal mit 30 Sekunden wiederholt.]\r\n\r\n");
+    retry.output.insert(0, L"[First attempt stopped after 15 seconds; retried once with a 30-second limit.]\r\n\r\n");
     if (retry.timedOut) {
-        retry.status = L"Timeout nach Wiederholung (15 + 30 Sekunden)";
+        retry.status = L"Timeout after retry (15 + 30 seconds)";
     } else if (!retry.stopped) {
-        retry.status.append(L" (nach Wiederholung)");
+        retry.status.append(L" (after retry)");
     }
     return retry;
 }
@@ -887,7 +887,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     result.exitCode = 0;
     result.processCompleted = true;
     result.protocolStatus = parsed.protocolStatus;
-    result.status = L"Cachetreffer, Status: " + Utf8ToWide(parsed.protocolStatus);
+    result.status = L"Cache hit, status: " + Utf8ToWide(parsed.protocolStatus);
     result.jsonOutput = entry->second;
     result.fromCache = true;
     return true;
@@ -957,7 +957,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     }
     error.clear();
     if (!std::filesystem::is_directory(root, error) || error) {
-        warnings.push_back(L"Scanpfad ist kein lesbares Verzeichnis: " + root.wstring());
+        warnings.push_back(L"Scan path is not a readable directory: " + root.wstring());
         return candidates;
     }
     if (HasVst3Extension(root)) {
@@ -969,7 +969,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     std::filesystem::recursive_directory_iterator iterator(root, options, error);
     const std::filesystem::recursive_directory_iterator end;
     if (error) {
-        warnings.push_back(L"Scanordner konnte nicht vollständig geöffnet werden: " +
+        warnings.push_back(L"Scan folder could not be opened completely: " +
                            FormatSystemError(error.value()));
         error.clear();
     }
@@ -993,12 +993,12 @@ void HashValue(std::uint64_t& hash, const Value& value) {
             addCandidate(current);
         }
         if (typeError) {
-            warnings.push_back(L"Zugriff übersprungen: " + current.wstring());
+            warnings.push_back(L"Access skipped: " + current.wstring());
         }
 
         iterator.increment(error);
         if (error) {
-            warnings.push_back(L"Dateisystemfehler beim Scan: " + FormatSystemError(error.value()));
+            warnings.push_back(L"File-system error during scan: " + FormatSystemError(error.value()));
             error.clear();
         }
     }
@@ -1014,7 +1014,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
                                            const std::filesystem::path& root,
                                            bool useCache) {
     ProbeRunResult result;
-    PublishProgress(window, state, L"Suche VST3-Module ...");
+    PublishProgress(window, state, L"Searching for VST3 modules ...");
     std::vector<std::wstring> warnings;
     const auto candidates = FindVst3Candidates(root, state, warnings);
     ProbeCache cache;
@@ -1042,7 +1042,7 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         if (useCache && !cacheKey.empty() &&
             TryLoadCachedProbe(candidates[index], cacheKey, cache, current)) {
             ++cacheHits;
-            PublishProgress(window, state, progressLabel + L" - Cachetreffer");
+            PublishProgress(window, state, progressLabel + L" - cache hit");
         } else {
             current = RunProbeWithRetry(window, state, candidates[index].wstring(), progressLabel);
         }
@@ -1102,25 +1102,25 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     }
     result.stopped = stopped;
     result.cacheHits = cacheHits;
-    result.status = stopped ? L"Batchscan abgebrochen: " : L"Batchscan beendet: ";
+    result.status = stopped ? L"Folder scan cancelled: " : L"Folder scan complete: ";
     result.status.append(std::to_wstring(completed)).append(L"/").append(
         std::to_wstring(candidates.size()));
     result.status.append(L", Plugins: ").append(std::to_wstring(result.inventory.size()));
     result.status.append(L", Module OK: ").append(std::to_wstring(successful));
-    result.status.append(L", Fehler: ").append(std::to_wstring(failed));
+    result.status.append(L", errors: ").append(std::to_wstring(failed));
     if (useCache) {
         result.status.append(L", Cache: ").append(std::to_wstring(cacheHits));
         if (cacheLoadResult == CacheLoadResult::Invalid) {
-            result.status.append(L" (Datei war ungültig)");
+            result.status.append(L" (file was invalid)");
         }
-        if (cacheFingerprintFailed) result.status.append(L" (Fingerprint fehlgeschlagen)");
-        if (cacheWriteFailed) result.status.append(L" (Schreiben fehlgeschlagen)");
+        if (cacheFingerprintFailed) result.status.append(L" (fingerprint failed)");
+        if (cacheWriteFailed) result.status.append(L" (write failed)");
     } else {
-        result.status.append(L", Cache: aus");
+        result.status.append(L", cache: off");
     }
-    result.status.append(L", CID-Konflikte: ").append(std::to_wstring(duplicateCids.size()));
-    result.status.append(L", Wiederholungen: ").append(std::to_wstring(retries));
-    result.status.append(L", Timeouts: ").append(std::to_wstring(timeouts));
+    result.status.append(L", CID conflicts: ").append(std::to_wstring(duplicateCids.size()));
+    result.status.append(L", retries: ").append(std::to_wstring(retries));
+    result.status.append(L", timeouts: ").append(std::to_wstring(timeouts));
     return result;
 }
 [[nodiscard]] bool SelectPath(HWND owner, bool selectFolder, std::wstring& selectedPath,
@@ -1136,16 +1136,16 @@ void HashValue(std::uint64_t& hash, const Value& value) {
     options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
     if (selectFolder) {
         options |= FOS_PICKFOLDERS;
-        dialog->SetTitle(folderTitle != nullptr ? folderTitle : L"Ordner auswählen");
+        dialog->SetTitle(folderTitle != nullptr ? folderTitle : L"Select folder");
     } else {
         options |= FOS_FILEMUSTEXIST;
         const COMDLG_FILTERSPEC filters[] = {
             {L"VST3-Module (*.vst3)", L"*.vst3"},
-            {L"Alle Dateien", L"*.*"},
+            {L"All files", L"*.*"},
         };
         dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
         dialog->SetDefaultExtension(L"vst3");
-        dialog->SetTitle(L"VST3-Datei auswählen");
+        dialog->SetTitle(L"Select VST3 file");
     }
     dialog->SetOptions(options);
 
@@ -1175,15 +1175,15 @@ void HashValue(std::uint64_t& hash, const Value& value) {
         return false;
     }
     const COMDLG_FILTERSPEC filters[] = {
-        {json ? L"JSON-Dateien (*.json)" : L"CSV-Dateien (*.csv)",
+        {json ? L"JSON files (*.json)" : L"CSV files (*.csv)",
          json ? L"*.json" : L"*.csv"},
-        {L"Alle Dateien", L"*.*"},
+        {L"All files", L"*.*"},
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     dialog->SetDefaultExtension(json ? L"json" : L"csv");
     dialog->SetFileName(json ? L"vst3_inventory.json" : L"vst3_inventory.csv");
-    dialog->SetTitle(json ? L"VST3-Inventar als JSON exportieren"
-                          : L"VST3-Inventar als CSV exportieren");
+    dialog->SetTitle(json ? L"Export VST3 inventory as JSON"
+                          : L"Export VST3 inventory as CSV");
 
     bool selected = false;
     if (SUCCEEDED(dialog->Show(owner))) {
@@ -1232,17 +1232,19 @@ void PopulateResultsList(AppState& state) {
         ListView_InsertItem(state.resultList, &item);
         SetListCell(state.resultList, row, 1, Utf8ToWide(record.vendor));
         SetListCell(state.resultList, row, 2, Utf8ToWide(record.version));
-        SetListCell(state.resultList, row, 3, Utf8ToWide(record.sdkVersion));
-        SetListCell(state.resultList, row, 4, JoinedCategories(record.subCategories));
-        SetListCell(state.resultList, row, 5, Utf8ToWide(ModuleFileName(record.modulePath)));
-        SetListCell(state.resultList, row, 6, Utf8ToWide(record.modulePath));
-        SetListCell(state.resultList, row, 7,
-                    record.duplicate ? L"Ja (" + std::to_wstring(record.duplicateCount) + L")"
-                                     : L"Nein");
-        SetListCell(state.resultList, row, 8, record.fromCache ? L"Ja" : L"Nein");
-        SetListCell(state.resultList, row, 9, Utf8ToWide(record.protocolStatus));
-        SetListCell(state.resultList, row, 10, std::to_wstring(record.probeDurationMs));
-        SetListCell(state.resultList, row, 11, Utf8ToWide(record.diagnostic));
+        SetListCell(state.resultList, row, 3,
+                    record.versionMissing ? L"Not reported" : L"VST3 factory");
+        SetListCell(state.resultList, row, 4, Utf8ToWide(record.sdkVersion));
+        SetListCell(state.resultList, row, 5, JoinedCategories(record.subCategories));
+        SetListCell(state.resultList, row, 6, Utf8ToWide(ModuleFileName(record.modulePath)));
+        SetListCell(state.resultList, row, 7, Utf8ToWide(record.modulePath));
+        SetListCell(state.resultList, row, 8,
+                    record.duplicate ? L"Yes (" + std::to_wstring(record.duplicateCount) + L")"
+                                     : L"No");
+        SetListCell(state.resultList, row, 9, record.fromCache ? L"Yes" : L"No");
+        SetListCell(state.resultList, row, 10, Utf8ToWide(record.protocolStatus));
+        SetListCell(state.resultList, row, 11, std::to_wstring(record.probeDurationMs));
+        SetListCell(state.resultList, row, 12, Utf8ToWide(record.diagnostic));
         ++row;
     }
     for (const auto& issue : state.displayedIssues) {
@@ -1253,12 +1255,12 @@ void PopulateResultsList(AppState& state) {
         item.iItem = row;
         item.pszText = const_cast<wchar_t*>(name.c_str());
         ListView_InsertItem(state.resultList, &item);
-        SetListCell(state.resultList, row, 5, filename);
-        SetListCell(state.resultList, row, 6, Utf8ToWide(issue.modulePath));
-        SetListCell(state.resultList, row, 7, L"Nein");
-        SetListCell(state.resultList, row, 8, L"Nein");
-        SetListCell(state.resultList, row, 9, Utf8ToWide(issue.status));
-        SetListCell(state.resultList, row, 11, Utf8ToWide(issue.diagnostic));
+        SetListCell(state.resultList, row, 6, filename);
+        SetListCell(state.resultList, row, 7, Utf8ToWide(issue.modulePath));
+        SetListCell(state.resultList, row, 8, L"No");
+        SetListCell(state.resultList, row, 9, L"No");
+        SetListCell(state.resultList, row, 10, Utf8ToWide(issue.status));
+        SetListCell(state.resultList, row, 12, Utf8ToWide(issue.diagnostic));
         ++row;
     }
 }
@@ -1268,19 +1270,20 @@ void PopulateResultsList(AppState& state) {
         case 0: return record.name;
         case 1: return record.vendor;
         case 2: return record.version;
-        case 3: return record.sdkVersion;
-        case 4: {
+        case 3: return record.versionMissing ? "1" : "0";
+        case 4: return record.sdkVersion;
+        case 5: {
             std::string value;
             for (const auto& category : record.subCategories) value.append(category).push_back('|');
             return value;
         }
-        case 5: return ModuleFileName(record.modulePath);
-        case 6: return record.modulePath;
-        case 7: return record.duplicate ? std::to_string(record.duplicateCount) : "0";
-        case 8: return record.fromCache ? "1" : "0";
-        case 9: return record.protocolStatus;
-        case 10: return std::to_string(record.probeDurationMs);
-        case 11: return record.diagnostic;
+        case 6: return ModuleFileName(record.modulePath);
+        case 7: return record.modulePath;
+        case 8: return record.duplicate ? std::to_string(record.duplicateCount) : "0";
+        case 9: return record.fromCache ? "1" : "0";
+        case 10: return record.protocolStatus;
+        case 11: return std::to_string(record.probeDurationMs);
+        case 12: return record.diagnostic;
         default: return record.name;
     }
 }
@@ -1295,7 +1298,7 @@ void SortInventory(AppState& state, int column) {
     const bool ascending = state.sortAscending;
     std::stable_sort(state.displayedInventory.begin(), state.displayedInventory.end(),
                      [column, ascending](const auto& left, const auto& right) {
-                         if (column == 10 && left.probeDurationMs != right.probeDurationMs) {
+                         if (column == 11 && left.probeDurationMs != right.probeDurationMs) {
                              return ascending ? left.probeDurationMs < right.probeDurationMs
                                               : left.probeDurationMs > right.probeDurationMs;
                          }
@@ -1318,7 +1321,7 @@ void ExportInventory(HWND window, const AppState& state, bool json) {
                                                                  state.displayedIssues);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
-        MessageBoxW(window, L"Die Exportdatei konnte nicht geöffnet werden.", kWindowTitle,
+        MessageBoxW(window, L"The export file could not be opened.", kWindowTitle,
                     MB_OK | MB_ICONERROR);
         return;
     }
@@ -1328,11 +1331,11 @@ void ExportInventory(HWND window, const AppState& state, bool json) {
     }
     output.write(content.data(), static_cast<std::streamsize>(content.size()));
     if (!output) {
-        MessageBoxW(window, L"Die Exportdatei konnte nicht vollständig geschrieben werden.",
+        MessageBoxW(window, L"The export file could not be written completely.",
                     kWindowTitle, MB_OK | MB_ICONERROR);
         return;
     }
-    MessageBoxW(window, L"Inventar wurde erfolgreich exportiert.", kWindowTitle,
+    MessageBoxW(window, L"Inventory exported successfully.", kWindowTitle,
                 MB_OK | MB_ICONINFORMATION);
 }
 
@@ -1350,10 +1353,17 @@ void SetRunning(AppState& state, bool running) {
 
 void UpdateFonts(HWND window, AppState& state) {
     if (state.uiFont != nullptr) DeleteObject(state.uiFont);
-    const int uiHeight = -MulDiv(10, static_cast<int>(state.dpi), 72);
-    state.uiFont = CreateFontW(uiHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    NONCLIENTMETRICSW metrics{sizeof(metrics)};
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0,
+                                   state.dpi)) {
+        state.uiFont = CreateFontIndirectW(&metrics.lfMessageFont);
+    }
+    if (state.uiFont == nullptr) {
+        const int uiHeight = -MulDiv(10, static_cast<int>(state.dpi), 72);
+        state.uiFont = CreateFontW(uiHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    }
 
     EnumChildWindows(
         window,
@@ -1419,7 +1429,7 @@ void LayoutControls(HWND window, AppState& state) {
 void StartProbe(HWND window, AppState& state) {
     const auto selectedPath = ReadWindowText(state.pathEdit);
     if (selectedPath.empty()) {
-        MessageBoxW(window, L"Bitte zuerst ein VST3-Modul oder einen Scanordner auswählen.",
+        MessageBoxW(window, L"Select a VST3 module or scan folder first.",
                     kWindowTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -1427,7 +1437,7 @@ void StartProbe(HWND window, AppState& state) {
     std::error_code error;
     const std::filesystem::path path(selectedPath);
     if (!std::filesystem::exists(path, error) || error) {
-        MessageBoxW(window, L"Der ausgewählte Pfad ist nicht erreichbar.", kWindowTitle,
+        MessageBoxW(window, L"The selected path cannot be accessed.", kWindowTitle,
                     MB_OK | MB_ICONERROR);
         return;
     }
@@ -1435,12 +1445,12 @@ void StartProbe(HWND window, AppState& state) {
     const auto mode = state.scanMode;
     const bool useCache = SendMessageW(state.cacheCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (mode == ScanMode::Folder && !isDirectory) {
-        MessageBoxW(window, L"Für den Ordnerscan muss ein Verzeichnis ausgewählt werden.",
+        MessageBoxW(window, L"Select a directory for a folder scan.",
                     kWindowTitle, MB_OK | MB_ICONWARNING);
         return;
     }
     if (mode == ScanMode::SingleModule && !HasVst3Extension(path)) {
-        MessageBoxW(window, L"Das ausgewählte Modul besitzt nicht die Endung .vst3.",
+        MessageBoxW(window, L"The selected module does not have a .vst3 extension.",
                     kWindowTitle, MB_OK | MB_ICONWARNING);
         return;
     }
@@ -1451,8 +1461,8 @@ void StartProbe(HWND window, AppState& state) {
     state.displayedIssues.clear();
     ListView_DeleteAllItems(state.resultList);
     SetWindowTextW(state.statusLabel, mode == ScanMode::Folder
-                                                ? L"Suche VST3-Module ..."
-                                                : L"Probe läuft: maximal 15 Sekunden ...");
+                                                ? L"Searching for VST3 modules ..."
+                                                : L"Probe running: up to 15 seconds ...");
     SetRunning(state, true);
 
     try {
@@ -1474,7 +1484,7 @@ void StartProbe(HWND window, AppState& state) {
                                               : std::string{};
                     if (state.stopRequested.load()) {
                         runResult.stopped = true;
-                        runResult.status = L"Prüfung abgebrochen";
+                        runResult.status = L"Scan cancelled";
                     } else if (!useCache || cacheKey.empty() ||
                                !TryLoadCachedProbe(modulePath, cacheKey, cache, runResult)) {
                         runResult = RunProbeWithRetry(window, state, selectedPath, label);
@@ -1488,13 +1498,13 @@ void StartProbe(HWND window, AppState& state) {
                     if (succeeded) {
                         if (useCache && !runResult.fromCache) {
                             if (cacheKey.empty()) {
-                                runResult.status.append(L", Cache-Fingerprint fehlgeschlagen");
+                                runResult.status.append(L", cache fingerprint failed");
                             } else if (!PutCachedProbe(modulePath, cacheKey,
                                                       runResult.jsonOutput, cache) ||
                                        !SaveProbeCache(cache)) {
-                                runResult.status.append(L", Cache konnte nicht geschrieben werden");
+                                runResult.status.append(L", cache could not be written");
                             } else if (cacheLoadResult == CacheLoadResult::Invalid) {
-                                runResult.status.append(L", Cachedatei wurde neu aufgebaut");
+                                runResult.status.append(L", cache file was rebuilt");
                             }
                         }
                         for (auto& plugin : parsed.audioPlugins) {
@@ -1520,11 +1530,11 @@ void StartProbe(HWND window, AppState& state) {
                     }
                 }
             } catch (const std::exception& exception) {
-                runResult.status = L"Unerwarteter GUI-Worker-Fehler";
+                runResult.status = L"Unexpected GUI worker error";
                 runResult.output = Utf8ToWide(exception.what());
             } catch (...) {
-                runResult.status = L"Unerwarteter GUI-Worker-Fehler";
-                runResult.output = L"Nicht näher bestimmbarer Fehler.";
+                runResult.status = L"Unexpected GUI worker error";
+                runResult.output = L"Unspecified error.";
             }
             {
                 std::lock_guard lock(state.resultMutex);
@@ -1534,7 +1544,7 @@ void StartProbe(HWND window, AppState& state) {
         });
     } catch (const std::exception& exception) {
         SetRunning(state, false);
-        SetWindowTextW(state.statusLabel, L"Worker-Thread konnte nicht gestartet werden.");
+        SetWindowTextW(state.statusLabel, L"Worker thread could not be started.");
         MessageBoxW(window, Utf8ToWide(exception.what()).c_str(), kWindowTitle,
                     MB_OK | MB_ICONERROR);
     }
@@ -1552,28 +1562,28 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             state = GetState(window);
             state->dpi = GetDpiForWindow(window);
             state->pathLabel = CreateWindowExW(
-                0, L"STATIC", L"VST3-Modul oder Scanordner:", WS_CHILD | WS_VISIBLE,
+                0, L"STATIC", L"VST3 module or scan folder:", WS_CHILD | WS_VISIBLE,
                 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
             state->pathEdit = CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(PathEdit), nullptr, nullptr);
             state->fileButton = CreateWindowExW(
-                0, L"BUTTON", L"VST3-Datei", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, L"BUTTON", L"VST3 file", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(FileButton), nullptr, nullptr);
             state->scanFolderButton = CreateWindowExW(
-                0, L"BUTTON", L"Scan-Ordner", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, L"BUTTON", L"Scan folder", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ScanFolderButton), nullptr, nullptr);
             state->runButton = CreateWindowExW(
-                0, L"BUTTON", L"Prüfen", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                0, L"BUTTON", L"Scan", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(RunButton), nullptr, nullptr);
             state->stopButton = CreateWindowExW(
                 0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(StopButton), nullptr, nullptr);
             state->outputLabel = CreateWindowExW(
-                0, L"STATIC", L"VST3-Inventar (Spaltenkopf anklicken zum Sortieren):",
+                0, L"STATIC", L"VST3 inventory (click a column header to sort):",
                 WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
             state->cacheCheckbox = CreateWindowExW(
-                0, L"BUTTON", L"Cache aktivieren",
+                0, L"BUTTON", L"Enable cache",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(CacheCheckbox), nullptr, nullptr);
             SendMessageW(state->cacheCheckbox, BM_SETCHECK, BST_UNCHECKED, 0);
@@ -1588,7 +1598,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(OutputEdit), nullptr, nullptr);
             state->statusLabel = CreateWindowExW(
-                0, L"STATIC", L"Bereit", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                0, L"STATIC", L"Ready", WS_CHILD | WS_VISIBLE | SS_LEFT,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(StatusLabel), nullptr, nullptr);
             if (state->pathLabel == nullptr || state->pathEdit == nullptr ||
                 state->fileButton == nullptr || state->scanFolderButton == nullptr ||
@@ -1596,7 +1606,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 state->outputLabel == nullptr || state->cacheCheckbox == nullptr ||
                 state->exportCsvButton == nullptr || state->exportJsonButton == nullptr ||
                 state->resultList == nullptr || state->statusLabel == nullptr) {
-                MessageBoxW(window, L"Die Benutzeroberfläche konnte nicht vollständig erstellt werden.",
+                MessageBoxW(window, L"The user interface could not be created completely.",
                             kWindowTitle, MB_OK | MB_ICONERROR);
                 return -1;
             }
@@ -1608,10 +1618,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 const wchar_t* title;
                 int width;
             } columns[] = {
-                {L"Plugin", 180}, {L"Hersteller", 140}, {L"Version", 100},
-                {L"SDK-Version", 100}, {L"Kategorie", 140}, {L"Modul", 220},
-                {L"Modulpfad", 360}, {L"Dublette", 80}, {L"Cache", 60},
-                {L"Status", 110}, {L"Dauer (ms)", 90}, {L"Diagnose", 300},
+                {L"Plugin", 180}, {L"Vendor", 140}, {L"Version", 100},
+                {L"Version source", 110}, {L"SDK version", 100}, {L"Category", 140},
+                {L"Module", 220},
+                {L"Module path", 360}, {L"Duplicate", 80}, {L"Cache", 60},
+                {L"Status", 110}, {L"Duration (ms)", 90}, {L"Diagnostic", 300},
             };
             for (int index = 0; index < static_cast<int>(std::size(columns)); ++index) {
                 LVCOLUMNW column{};
@@ -1656,16 +1667,16 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     if (SelectPath(window, false, selected)) {
                         state->scanMode = ScanMode::SingleModule;
                         SetWindowTextW(state->pathEdit, selected.c_str());
-                        SetWindowTextW(state->statusLabel, L"Einzelmodul ausgewählt");
+                        SetWindowTextW(state->statusLabel, L"Single module selected");
                     }
                     return 0;
                 }
                 case ScanFolderButton: {
                     std::wstring selected;
-                    if (SelectPath(window, true, selected, L"VST3-Scanordner auswählen")) {
+                    if (SelectPath(window, true, selected, L"Select VST3 scan folder")) {
                         state->scanMode = ScanMode::Folder;
                         SetWindowTextW(state->pathEdit, selected.c_str());
-                        SetWindowTextW(state->statusLabel, L"Scanordner ausgewählt");
+                        SetWindowTextW(state->statusLabel, L"Scan folder selected");
                     }
                     return 0;
                 }
@@ -1679,7 +1690,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     ExportInventory(window, *state, true);
                     return 0;
                 case StopButton:
-                    SetWindowTextW(state->statusLabel, L"Vorgang wird beendet ...");
+                    SetWindowTextW(state->statusLabel, L"Stopping ...");
                     EnableWindow(state->stopButton, FALSE);
                     RequestStop(*state);
                     return 0;
@@ -1751,7 +1762,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
                                                        COINIT_DISABLE_OLE1DDE);
     if (FAILED(comResult)) {
-        MessageBoxW(nullptr, L"Die Windows-Dateiauswahl konnte nicht initialisiert werden.",
+        MessageBoxW(nullptr, L"The Windows file picker could not be initialized.",
                     kWindowTitle, MB_OK | MB_ICONERROR);
         return 1;
     }

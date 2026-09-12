@@ -21,11 +21,18 @@ std::string ValidProbeJson() {
         "status": "ok",
         "module": {
             "path": "C:\\Plugins\\Shell.vst3",
+            "name": "Shell",
+            "isBundle": false,
             "factoryVendor": "Factory Vendor",
+            "factoryUrl": "https://example.invalid",
+            "factoryEmail": "support@example.invalid",
+            "factoryFlags": 0,
+            "classCount": 2,
             "probeDurationMs": 42
         },
         "classes": [
             {
+                "index": 0,
                 "cid": "00112233445566778899AABBCCDDEEFF",
                 "category": "Audio Module Class",
                 "name": "Compressor",
@@ -33,10 +40,15 @@ std::string ValidProbeJson() {
                 "version": "2.4.1",
                 "sdkVersion": "VST 3.8.0",
                 "subCategories": ["Fx", "Dynamics"],
+                "classFlags": 0,
+                "cardinality": 2147483647,
+                "factoryInterface": 3,
                 "isAudioPlugin": true,
+                "versionMissing": false,
                 "diagnostic": ""
             },
             {
+                "index": 1,
                 "cid": "FFEEDDCCBBAA99887766554433221100",
                 "category": "Component Controller Class",
                 "name": "Compressor Controller",
@@ -44,7 +56,11 @@ std::string ValidProbeJson() {
                 "version": "2.4.1",
                 "sdkVersion": "VST 3.8.0",
                 "subCategories": [],
+                "classFlags": 0,
+                "cardinality": 1,
+                "factoryInterface": 3,
                 "isAudioPlugin": false,
+                "versionMissing": false,
                 "diagnostic": ""
             }
         ],
@@ -58,22 +74,31 @@ std::string WaveShellProbeJson() {
         "status": "ok",
         "module": {
             "path": "C:\\VST3\\WaveShell1-VST3 17.1_x64.vst3",
+            "name": "WaveShell1-VST3 17.1_x64",
+            "isBundle": false,
             "factoryVendor": "Waves",
+            "factoryUrl": "https://www.waves.com",
+            "factoryEmail": "",
+            "factoryFlags": 17,
+            "classCount": 3,
             "probeDurationMs": 12610
         },
         "classes": [
-            {"cid":"00112233445566778899AABBCCDDEE01","category":"Audio Module Class",
+            {"index":0,"cid":"00112233445566778899AABBCCDDEE01","category":"Audio Module Class",
              "name":"COSMOS Sample Finder Stereo","vendor":"Waves","version":"17.1.42.50",
              "sdkVersion":"VST 3.6.9","subCategories":["Instrument","Waves"],
-             "isAudioPlugin":true,"diagnostic":""},
-            {"cid":"00112233445566778899AABBCCDDEE02","category":"Audio Module Class",
+             "classFlags":1,"cardinality":2147483647,"factoryInterface":3,
+             "isAudioPlugin":true,"versionMissing":false,"diagnostic":""},
+            {"index":1,"cid":"00112233445566778899AABBCCDDEE02","category":"Audio Module Class",
              "name":"OVox Instrument Stereo","vendor":"Waves","version":"17.1.42.51",
              "sdkVersion":"VST 3.6.9","subCategories":["Instrument","Waves"],
-             "isAudioPlugin":true,"diagnostic":""},
-            {"cid":"00112233445566778899AABBCCDDEE03","category":"Audio Module Class",
+             "classFlags":1,"cardinality":2147483647,"factoryInterface":3,
+             "isAudioPlugin":true,"versionMissing":false,"diagnostic":""},
+            {"index":2,"cid":"00112233445566778899AABBCCDDEE03","category":"Audio Module Class",
              "name":"OVox Stereo","vendor":"Waves","version":"17.1.42.51",
              "sdkVersion":"VST 3.6.9","subCategories":["Fx","Modulation"],
-             "isAudioPlugin":true,"diagnostic":""}
+             "classFlags":1,"cardinality":2147483647,"factoryInterface":3,
+             "isAudioPlugin":true,"versionMissing":false,"diagnostic":""}
         ],
         "diagnostic": ""
     })";
@@ -86,6 +111,22 @@ void TestStrictParsingAndAudioFilter() {
     Check(parsed.audioPlugins[0].vendor == "Factory Vendor",
           "empty class vendor must use authoritative factory vendor");
     Check(parsed.audioPlugins[0].version == "2.4.1", "raw version must be retained");
+    Check(!parsed.audioPlugins[0].versionMissing,
+          "a non-empty factory version must be marked as reported");
+
+    auto missingVersion = ValidProbeJson();
+    const auto version = missingVersion.find("\"version\": \"2.4.1\"");
+    missingVersion.replace(version, std::string("\"version\": \"2.4.1\"").size(),
+                           "\"version\": \"\"");
+    const auto marker = missingVersion.find("\"versionMissing\": false");
+    missingVersion.replace(marker, std::string("\"versionMissing\": false").size(),
+                           "\"versionMissing\": true");
+    const auto parsedMissing = vst3scanner::ParseProbeResultJson(missingVersion);
+    Check(parsedMissing.valid && parsedMissing.audioPlugins[0].versionMissing,
+          "an empty factory version must remain visible as missing");
+    Check(vst3scanner::SerializeInventoryCsv(parsedMissing.audioPlugins, {})
+                  .find(";Not reported;") != std::string::npos,
+          "CSV must label an omitted factory version without inventing one");
 }
 
 void TestProtocolErrors() {
@@ -111,6 +152,21 @@ void TestProtocolErrors() {
     invalidUtf8[namePosition] = static_cast<char>(0xFF);
     Check(!vst3scanner::ParseProbeResultJson(invalidUtf8).valid,
           "invalid UTF-8 must be rejected by the protocol parser");
+
+    auto inconsistentVersion = ValidProbeJson();
+    const auto versionMissingPosition = inconsistentVersion.find("\"versionMissing\": false");
+    inconsistentVersion.replace(versionMissingPosition,
+                                std::string("\"versionMissing\": false").size(),
+                                "\"versionMissing\": true");
+    Check(!vst3scanner::ParseProbeResultJson(inconsistentVersion).valid,
+          "versionMissing must agree with the raw factory version");
+
+    auto wrongClassCount = ValidProbeJson();
+    const auto classCountPosition = wrongClassCount.find("\"classCount\": 2");
+    wrongClassCount.replace(classCountPosition, std::string("\"classCount\": 2").size(),
+                            "\"classCount\": 1");
+    Check(!vst3scanner::ParseProbeResultJson(wrongClassCount).valid,
+          "module classCount must match the classes array");
 }
 
 void TestCidDuplicateDetection() {
@@ -144,18 +200,42 @@ void TestExports() {
     vst3scanner::MarkCidDuplicates(parsed.audioPlugins);
     const auto csv = vst3scanner::SerializeInventoryCsv(parsed.audioPlugins, {});
     const auto json = vst3scanner::SerializeInventoryJson(parsed.audioPlugins, {});
-    Check(csv.find("Plugin;Hersteller;Version;SDK-Version;Kategorie;Modul;Modulpfad;") == 0,
+    Check(csv.find("Plugin;Vendor;Version;Version source;SDK version;Category;Module;Module path;") == 0,
           "CSV columns must match the visible inventory order");
-    Check(csv.find("Compressor;Factory Vendor;2.4.1;VST 3.8.0") != std::string::npos,
+    Check(csv.find("Compressor;Factory Vendor;2.4.1;VST3 factory;VST 3.8.0") !=
+              std::string::npos,
           "CSV must contain harmonized inventory values");
     Check(csv.find(";CID;") == std::string::npos,
           "CID must remain hidden from the user-facing CSV table");
     Check(json.find("\"version\":\"2.4.1\"") != std::string::npos,
           "JSON must contain raw installed version");
+    Check(json.find("\"versionMissing\":false") != std::string::npos,
+          "JSON must expose whether the factory reported a version");
     Check(json.find("\"probeDurationMs\":42") != std::string::npos,
           "JSON must contain probe duration");
     Check(json.find("\"diagnostic\":\"\"") != std::string::npos,
           "JSON must preserve per-plugin diagnostics");
+}
+
+void TestCsvFormulaInjectionGuard() {
+    vst3scanner::InventoryRecord record;
+    record.cid = "00112233445566778899AABBCCDDEEFF";
+    record.name = "=HYPERLINK(\"https://example.invalid\")";
+    record.vendor = "+Untrusted vendor";
+    record.version = "-1+1";
+    record.sdkVersion = "@SUM(1,1)";
+    record.modulePath = "C:\\VST3\\Safe.vst3";
+    record.protocolStatus = "ok";
+
+    const auto csv = vst3scanner::SerializeInventoryCsv({record}, {});
+    Check(csv.find("\"'=HYPERLINK(\"\"https://example.invalid\"\")\"") != std::string::npos,
+          "CSV must neutralize formula-like plug-in names");
+    Check(csv.find("\"'+Untrusted vendor\"") != std::string::npos,
+          "CSV must neutralize formula-like vendor names");
+    Check(csv.find("\"'-1+1\"") != std::string::npos,
+          "CSV must neutralize formula-like version values");
+    Check(csv.find("\"'@SUM(1,1)\"") != std::string::npos,
+          "CSV must neutralize formula-like SDK values");
 }
 
 void TestWaveShellExpansion() {
@@ -173,6 +253,21 @@ void TestWaveShellExpansion() {
     const auto csv = vst3scanner::SerializeInventoryCsv(parsed.audioPlugins, {});
     Check(csv.find("WaveShell1-VST3 17.1_x64.vst3") != std::string::npos,
           "CSV must identify the WaveShell module for every expanded class");
+}
+
+void TestDuplicateFactoryClassHandling() {
+    auto duplicate = WaveShellProbeJson();
+    const auto duplicateCid = duplicate.rfind("00112233445566778899AABBCCDDEE03");
+    duplicate.replace(duplicateCid, 32, "00112233445566778899AABBCCDDEE01");
+    Check(!vst3scanner::ParseProbeResultJson(duplicate).valid,
+          "an OK response must not silently contain duplicate audio CIDs");
+
+    const auto status = duplicate.find("\"status\": \"ok\"");
+    duplicate.replace(status, std::string("\"status\": \"ok\"").size(),
+                      "\"status\": \"partial\"");
+    const auto parsed = vst3scanner::ParseProbeResultJson(duplicate);
+    Check(parsed.valid && parsed.audioPlugins.size() == 2,
+          "a partial factory response must retain one row per unique audio CID");
 }
 
 void TestProbeCacheFormat() {
@@ -218,7 +313,9 @@ int main() {
     TestProtocolErrors();
     TestCidDuplicateDetection();
     TestExports();
+    TestCsvFormulaInjectionGuard();
     TestWaveShellExpansion();
+    TestDuplicateFactoryClassHandling();
     TestProbeCacheFormat();
     if (failures == 0) std::cout << "All VST3 inventory tests passed.\n";
     return failures == 0 ? 0 : 1;

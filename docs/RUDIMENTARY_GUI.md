@@ -1,96 +1,99 @@
-# GUI, Inventar und Batchscan
+# GUI, inventory, and folder scanning
 
-## Zweck
+## Purpose
 
-`Vst3ProbeGui.exe` scannt einzelne VST3-Module oder komplette Ordner ohne
-Kommandozeile. Fremder Plugin-Code wird weiterhin ausschliesslich in der separaten
-`Vst3MetadataProbe.exe` geladen.
+`Vst3ProbeGui.exe` scans individual VST3 modules or entire folders without a
+command line. Third-party plug-in code is still loaded only by the separate
+`Vst3MetadataProbe.exe` process.
 
-## Bedienung
+## Usage
 
-1. `Vst3ProbeGui.exe` starten.
-2. `VST3-Datei` oder `Scan-Ordner` waehlen. Bundle-Verzeichnisse werden im
-   Ordnerscan automatisch erkannt.
-3. `Pruefen` anklicken.
-4. Das Inventar ueber die Spaltenkoepfe sortieren.
-5. Bei Bedarf `Export CSV` oder `Export JSON` verwenden.
+1. Start `Vst3ProbeGui.exe`.
+2. Select `VST3 file` or `Scan folder`. Folder scans recognize bundle directories
+   automatically.
+3. Click `Scan`.
+4. Sort the inventory by clicking a column header.
+5. Use `Export CSV` or `Export JSON` when needed.
 
-CSV wird mit UTF-8-BOM und Semikolon geschrieben. Dadurch laesst sich die Datei
-direkt mit einer deutschen Excel-Installation oeffnen.
+CSV uses a UTF-8 BOM and semicolon separators for direct spreadsheet import.
+Formula-like values from untrusted plug-in metadata are prefixed safely.
 
-## Inventarmodell
+## Inventory model
 
-- Nur Factory-Klassen der exakten Kategorie `Audio Module Class` werden als Plugins
-  angezeigt.
-- Name, Version, CID, SDK-Version und Kategorien bleiben unveraenderte Factory-Werte.
-- Ist der Hersteller einer Klasse leer, wird der Hersteller derselben Plugin-Factory
-  verwendet. Es gibt keine Namensheuristik.
-- Controller-, Compatibility- und ARA-Hilfsklassen werden nicht als eigene Plugins
-  gezaehlt.
-- Multi-Plugin-Module wie WaveShells werden nicht als eine Shell-Zeile dargestellt:
-  Jede gemeldete Audio-Klasse erscheint als eigenes Plugin, die Spalte `Modul` zeigt
-  jeweils die gemeinsame WaveShell-Datei.
-- Eine CID ist nur dann eine moegliche Dublette, wenn sie aus mindestens zwei
-  verschiedenen Modulpfaden stammt.
-- CID bleibt intern und im JSON erhalten, wird aber weder im Fenster noch im CSV
-  angezeigt.
-- Fehler und Dateisystemwarnungen erscheinen als eigene Problemzeilen.
+- Only factory classes with the exact `Audio Module Class` category are shown as
+  plug-ins.
+- Name, version, CID, SDK version, and categories remain unmodified factory values.
+- `Version source` shows `VST3 factory` when the factory supplies a non-empty raw
+  version; otherwise it shows `Not reported`.
+- An empty class vendor falls back only to the vendor of the same plug-in factory.
+  No name heuristic is used.
+- Controller, compatibility, and ARA helper classes are not counted as plug-ins.
+- Multi-plug-in modules such as WaveShells are not represented by one shell row.
+  Every reported audio class appears as a separate plug-in while `Module` shows
+  the shared WaveShell file.
+- A CID is a possible duplicate only if it appears under at least two different
+  module paths.
+- CID remains available internally and in JSON, but is hidden from the GUI and CSV.
+- Errors and file-system warnings appear as separate issue rows.
 
 ## Cache
 
-Nur wenn `Cache aktivieren` markiert ist, werden erfolgreiche Antworten unter
-`<EXE-Verzeichnis>\vst3_scanner_cache.json` gespeichert. Die eine Datei enthaelt
-alle gueltigen Moduleintraege. Der Schluessel beruecksichtigt:
+Successful responses are stored in
+`<executable-directory>\vst3_scanner_cache.json` only when `Enable cache` is
+selected. This single file contains all valid module entries. Its key includes:
 
-- den kanonischen Modulpfad,
-- relative Dateien eines Bundles,
-- Dateigroessen,
-- Aenderungszeiten,
-- den vollstaendigen Inhalt von VST3-/DLL-Binaerdateien und `moduleinfo.json`.
+- the canonical module path;
+- relative files within a bundle;
+- file sizes;
+- modification times;
+- the full content of VST3/DLL binaries and `moduleinfo.json`.
 
-Die Checkbox ist standardmaessig nicht markiert; ein normaler Scan prueft daher jedes
-Modul neu und schreibt keine Cachedateien. Jeder Cachetreffer wird erneut als
-Schema-2-JSON validiert. Fehler, Timeouts,
-`no_classes` und ungueltige Protokollantworten werden nicht gespeichert. Aendert sich
-ein Modul, entsteht automatisch ein neuer Cacheeintrag.
+The checkbox is cleared by default. A normal scan therefore probes every module
+again and writes no cache file. Every cache hit is revalidated as schema-2 JSON.
+Errors, timeouts, `no_classes`, and invalid protocol responses are never stored.
+Changing a module automatically creates a new cache entry.
 
-Ist das EXE-Verzeichnis bei aktiviertem Cache nicht beschreibbar, wird der Scan ohne
-gespeicherte neue Eintraege fortgesetzt und die Statuszeile meldet den Schreibfehler.
-Es gibt keinen stillen Fallback in ein anderes Verzeichnis.
+If the executable directory is not writable, scanning continues without saving
+new entries and the status line reports the write failure. There is no silent
+fallback to a different directory.
 
-Die Cachedatei wird pro Scan einmal geladen und am Ende atomar ueber eine temporaere
-Datei ersetzt. Ist Schema oder Inhalt ungueltig, wird kein Eintrag daraus verwendet.
+The cache is loaded once per scan and replaced atomically through a temporary
+file at the end. An invalid schema or payload causes the entire cache to be ignored.
 
-## Kandidatensuche
+## Candidate discovery
 
-- `.vst3`-Dateien und `.vst3`-Verzeichnisse werden rekursiv gefunden.
-- Ein Bundle-Verzeichnis ist genau ein Kandidat; sein Inhalt wird nicht erneut als
-  Pluginpfad gescannt.
-- Pfade werden kanonisiert, ohne Beachtung der Gross-/Kleinschreibung dedupliziert
-  und reproduzierbar sortiert.
-- Verzeichnis-Symlinks werden nicht verfolgt.
-- Zugriffsfehler werden protokolliert und stoppen den Scan nicht.
+- `.vst3` files and `.vst3` directories are found recursively.
+- A bundle directory is one candidate; its contents are not scanned again as
+  separate plug-in paths.
+- Paths are canonicalized, deduplicated case-insensitively, and sorted
+  deterministically.
+- Directory symlinks are not followed.
+- Access errors are reported but do not stop the scan.
 
-## Timeout und Isolation
+## Timeout and isolation
 
-1. Erster Versuch: maximal 15 Sekunden.
-2. Nur nach Timeout: genau eine Wiederholung mit maximal 30 Sekunden.
-3. Kein dritter Versuch.
+1. Initial attempt: up to 15 seconds.
+2. On timeout only: exactly one retry with a 30-second limit.
+3. No third attempt.
 
-Jeder Versuch laeuft in einem eigenen Windows Job Object. Stoppen, Fensterschliessen
-und Timeout beenden den gesamten Probe-Prozessbaum. Die GUI linkt kein Plugin-Hosting
-und bleibt waehrend des Scans bedienbar. Nach einer fehlgeschlagenen Terminierung
-wird maximal fuenf Sekunden weiter gewartet; danach folgt eine sichtbare Problemzeile
-statt eines unbegrenzten Pipe-Thread-Wartens.
+Each attempt runs in its own Windows Job Object. Stop, window close, and timeout
+terminate the entire probe process tree. The GUI links no plug-in-hosting code
+and remains responsive during a scan. If termination fails, the scanner waits no
+more than five additional seconds and then produces a visible issue row instead
+of waiting indefinitely for pipe-reader threads.
 
-## Verifizierte Tests
+## Verified tests
 
-- Parser lehnt leere Ausgabe, defektes JSON, unbekannte Schemata und unbekannte
-  Statuswerte ab.
-- Nur Audio-Klassen gelangen ins Inventar.
-- Factory-Hersteller wird bei leerem Klassenhersteller korrekt uebernommen.
-- CID-Dubletten werden nur ueber verschiedene Modulpfade markiert.
-- Eine simulierte WaveShell-Antwort erzeugt eine Inventarzeile je Audio-Klasse.
-- CSV- und JSON-Export bewahren den rohen Versionswert.
-- Reales `bitcrust.vst3`: erster Lauf erzeugt den Cache; zweiter Lauf meldet einen
-  Cachetreffer und startet keine erneute Probe.
+- The parser rejects empty output, malformed JSON, unknown schemas, and unknown
+  status values.
+- Only audio classes enter the inventory.
+- An empty class vendor correctly falls back to the factory vendor.
+- CID duplicates are marked only across different module paths.
+- A simulated WaveShell response creates one inventory row per audio class.
+- Inconsistent `versionMissing` values, class counts, and class indices are
+  rejected as protocol errors.
+- Duplicate audio CIDs in a `partial` module are reduced to one inventory row;
+  they are protocol errors in an `ok` response.
+- CSV and JSON preserve the raw version value.
+- A real `bitcrust.vst3` run creates the cache on the first pass; the second pass
+  reports a cache hit and does not start another probe.

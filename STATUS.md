@@ -1,48 +1,67 @@
-# Projektstatus
+# Project status
 
-Version: 2.3.0
+Date: 2026-09-12
+Version: 2.4.0
 Branch: `restart/vst3-sdk-probe`
 
-## Aktiver Scanner
+## Active scanner
 
-Der aktive Stand ist ein nativer Windows-x64-Scanner für VST3. Er besteht aus:
+The active codebase is a native Windows x64 VST3 scanner consisting of:
 
-- `Vst3ProbeGui.exe`: Win32-Oberfläche, rekursiver Ordnerscan, Sortierung und Export;
-- `Vst3MetadataProbe.exe`: isolierter Prozess für genau ein VST3-Modul;
-- dem offiziellen Steinberg VST3 SDK als fixiertem Git-Submodule;
-- einem streng validierten JSON-Protokoll zwischen GUI und Probe.
+- `Vst3ProbeGui.exe`: Win32 interface, recursive folder scan, sorting, and export;
+- `Vst3MetadataProbe.exe`: isolated process for exactly one VST3 module;
+- the official Steinberg VST3 SDK as a pinned Git submodule;
+- a strictly validated JSON protocol between the GUI and the probe.
 
-Die Probe fragt ausschließlich Factory- und ClassInfo-Metadaten ab. Sie erzeugt keine
-Plugininstanz und verändert keine Plugin-Dateien. Version, Hersteller, Name, CID,
-Kategorien und SDK-Version stammen direkt aus der VST3-Factory. Es gibt keine
-Versions- oder Herstellerheuristik.
+The probe queries factory and ClassInfo metadata only. It does not create a
+plug-in instance or modify plug-in files. Version, vendor, name, CID, categories,
+and SDK version come directly from the VST3 factory. No version or vendor
+heuristics are used.
 
-## Sicherheit und Verhalten
+The parser validates the complete schema-2 structure, including agreement
+between `classCount` and the class array, and between `version` and
+`versionMissing`. The table and both export formats show whether the factory
+reported a version. Repeated audio CIDs from the same module are not counted
+more than once.
 
-- Jedes Modul läuft in einem eigenen Windows Job Object.
-- Erster Timeout: 15 Sekunden; genau eine Wiederholung mit maximal 30 Sekunden.
-- Stoppen, Timeout und Fensterschließen beenden den gesamten Probe-Prozessbaum.
-- Nur die drei Standard-Handles werden an den Probe-Prozess vererbt.
-- Abstürze und widersprüchliche Prozessantworten werden gesondert diagnostiziert.
-- Fehlgeschlagene Prozessbeendigung blockiert die GUI nicht unbegrenzt.
-- `.vst3`-Dateien und Bundle-Verzeichnisse werden rekursiv erkannt.
-- Verzeichnis-Symlinks werden nicht verfolgt.
+## Safety and behavior
 
-## Cache und Export
+- Every module runs in its own Windows Job Object.
+- Initial timeout: 15 seconds; exactly one retry with a 30-second limit.
+- Stop, timeout, and window close terminate the entire probe process tree.
+- Only the three standard handles are inherited by the probe process.
+- Crashes and inconsistent process responses have dedicated diagnostics.
+- A failed process termination cannot block the GUI indefinitely.
+- `.vst3` files and bundle directories are discovered recursively.
+- Directory symlinks are not followed.
 
-Der optionale Cache ist standardmäßig deaktiviert. Wenn er aktiviert wird, liegt die
-einzige Datei `vst3_scanner_cache.json` neben der GUI-EXE. Ein Cachetreffer setzt einen
-unveränderten Pfad, unveränderte Dateigrößen und unveränderte Änderungszeiten voraus.
-Zusätzlich wird der Inhalt von VST3-/DLL-Binärdateien und `moduleinfo.json` gehasht.
-Nur erfolgreiche und erneut validierte Probe-Antworten werden gespeichert.
+## Cache and export
 
-Fenstertabelle und CSV verwenden dieselbe Spaltenreihenfolge. Multi-Plugin-Module
-wie WaveShells erscheinen als eine Zeile pro Audio-Klasse mit gemeinsamer Moduldatei.
-CID bleibt intern für die Dublettenerkennung und im JSON erhalten. CSV wird mit
-UTF-8-BOM und Semikolon geschrieben.
+The optional cache is disabled by default. When enabled, the only cache file is
+`vst3_scanner_cache.json` next to the GUI executable. A cache hit requires an
+unchanged path, file sizes, and modification times. The content of VST3/DLL
+binaries and `moduleinfo.json` is hashed as well. Only successful, revalidated
+probe responses are stored.
 
-## Historischer Stand
+The GUI table and CSV use the same column order. Multi-plug-in modules such as
+WaveShells appear as one row per audio class with a shared module file. CID
+remains available internally for duplicate detection and in JSON, but is hidden
+from the GUI and CSV. CSV uses a UTF-8 BOM, semicolon separators, and neutralizes
+formula-like values from untrusted metadata.
 
-Der frühere passive C++-Scanner ist über den Tag `cpp-v1.1.0-pre-restart` erhalten.
-Seine heuristischen Quellen und alten Projektdateien gehören nicht mehr zum aktiven
-Branch.
+The GUI manifest enables Common Controls v6, Per-Monitor V2 DPI awareness, and
+long-path support. Controls use the DPI-aware system message font where available.
+
+## Historical codebase
+
+The previous passive C++ scanner is preserved under the
+`cpp-v1.1.0-pre-restart` tag. Its heuristics and old project files are not part
+of the active branch.
+
+## Real-world reference tests for 2.4.0
+
+- WaveShell 17.1: four audio classes with four reported version values;
+- WaveShell 12.7, 16.0, and 16.7: factory loads but exports zero classes;
+- Guitar Rig 7: valid audio class after approximately 13.6 seconds;
+- Komplete Kontrol: valid audio class after approximately 15 seconds, making it
+  an expected candidate for the single 30-second retry.

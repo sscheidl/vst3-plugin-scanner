@@ -50,6 +50,32 @@ constexpr rapidjson::SizeType kMaximumProtocolClasses = 100000U;
     return true;
 }
 
+[[nodiscard]] bool ReadInteger(const JsonValue& object,
+                               const char* name,
+                               std::int32_t& output,
+                               std::string& error) {
+    const auto* value = Member(object, name);
+    if (value == nullptr || !value->IsInt()) {
+        error = std::string("Missing or invalid integer field: ") + name;
+        return false;
+    }
+    output = value->GetInt();
+    return true;
+}
+
+[[nodiscard]] bool ReadUnsigned(const JsonValue& object,
+                                const char* name,
+                                std::uint32_t& output,
+                                std::string& error) {
+    const auto* value = Member(object, name);
+    if (value == nullptr || !value->IsUint()) {
+        error = std::string("Missing or invalid unsigned field: ") + name;
+        return false;
+    }
+    output = value->GetUint();
+    return true;
+}
+
 [[nodiscard]] bool IsValidCid(std::string_view cid) {
     return cid.size() == 32U && std::all_of(cid.begin(), cid.end(), [](unsigned char value) {
         return std::isxdigit(value) != 0;
@@ -93,10 +119,17 @@ constexpr rapidjson::SizeType kMaximumProtocolClasses = 100000U;
 }
 
 [[nodiscard]] std::string CsvEscape(std::string_view value) {
-    if (value.find_first_of(";\",\r\n") == std::string_view::npos) {
+    // Prevent spreadsheet applications from interpreting untrusted plug-in metadata
+    // as a formula when the CSV is opened. Tabs and carriage returns are included
+    // because some spreadsheet importers treat them as formula prefixes.
+    const bool needsFormulaGuard = !value.empty() &&
+        (value.front() == '=' || value.front() == '+' || value.front() == '-' ||
+         value.front() == '@' || value.front() == '\t' || value.front() == '\r');
+    if (!needsFormulaGuard && value.find_first_of(";\",\r\n\t") == std::string_view::npos) {
         return std::string(value);
     }
     std::string result = "\"";
+    if (needsFormulaGuard) result.push_back('\'');
     for (const char character : value) {
         if (character == '\"') result.push_back('\"');
         result.push_back(character);
@@ -146,8 +179,24 @@ ParsedProbeResult ParseProbeResultJson(std::string_view json) {
         result.error = "Missing or invalid module object.";
         return result;
     }
+    std::string moduleName;
+    std::string factoryUrl;
+    std::string factoryEmail;
+    bool isBundle = false;
+    std::int32_t factoryFlags = 0;
+    std::int32_t classCount = 0;
     if (!ReadString(*module, "path", result.modulePath, result.error) ||
-        !ReadString(*module, "factoryVendor", result.factoryVendor, result.error)) {
+        !ReadString(*module, "name", moduleName, result.error) ||
+        !ReadBoolean(*module, "isBundle", isBundle, result.error) ||
+        !ReadString(*module, "factoryVendor", result.factoryVendor, result.error) ||
+        !ReadString(*module, "factoryUrl", factoryUrl, result.error) ||
+        !ReadString(*module, "factoryEmail", factoryEmail, result.error) ||
+        !ReadInteger(*module, "factoryFlags", factoryFlags, result.error) ||
+        !ReadInteger(*module, "classCount", classCount, result.error)) {
+        return result;
+    }
+    if (classCount < 0 || static_cast<rapidjson::SizeType>(classCount) > kMaximumProtocolClasses) {
+        result.error = "module.classCount is outside the supported range.";
         return result;
     }
     const auto* duration = Member(*module, "probeDurationMs");
@@ -164,7 +213,13 @@ ParsedProbeResult ParseProbeResultJson(std::string_view json) {
         result.error = "Missing or invalid classes array.";
         return result;
     }
+    if (classes->Size() != static_cast<rapidjson::SizeType>(classCount)) {
+        result.error = "module.classCount does not match the classes array.";
+        return result;
+    }
 
+    std::unordered_set<std::int32_t> classIndexes;
+    std::unordered_set<std::string> audioCids;
     for (const auto& pluginClass : classes->GetArray()) {
         if (!pluginClass.IsObject()) {
             result.error = "Every classes entry must be an object.";
@@ -179,14 +234,37 @@ ParsedProbeResult ParseProbeResultJson(std::string_view json) {
         std::string sdkVersion;
         std::string diagnostic;
         bool isAudioPlugin = false;
-        if (!ReadString(pluginClass, "cid", cid, result.error) ||
+        bool versionMissing = false;
+        std::int32_t index = -1;
+        std::int32_t cardinality = 0;
+        std::int32_t factoryInterface = 0;
+        std::uint32_t classFlags = 0;
+        if (!ReadInteger(pluginClass, "index", index, result.error) ||
+            !ReadString(pluginClass, "cid", cid, result.error) ||
             !ReadString(pluginClass, "category", category, result.error) ||
             !ReadString(pluginClass, "name", name, result.error) ||
             !ReadString(pluginClass, "vendor", vendor, result.error) ||
             !ReadString(pluginClass, "version", version, result.error) ||
             !ReadString(pluginClass, "sdkVersion", sdkVersion, result.error) ||
+            !ReadUnsigned(pluginClass, "classFlags", classFlags, result.error) ||
+            !ReadInteger(pluginClass, "cardinality", cardinality, result.error) ||
+            !ReadInteger(pluginClass, "factoryInterface", factoryInterface, result.error) ||
             !ReadBoolean(pluginClass, "isAudioPlugin", isAudioPlugin, result.error) ||
+            !ReadBoolean(pluginClass, "versionMissing", versionMissing, result.error) ||
             !ReadString(pluginClass, "diagnostic", diagnostic, result.error)) {
+            return result;
+        }
+
+        if (index < 0 || index >= classCount || !classIndexes.insert(index).second) {
+            result.error = "Class index is outside the module range or duplicated.";
+            return result;
+        }
+        if (factoryInterface < 0 || factoryInterface > 3) {
+            result.error = "factoryInterface is outside the supported range.";
+            return result;
+        }
+        if (versionMissing != version.empty()) {
+            result.error = "Inconsistent version/versionMissing fields.";
             return result;
         }
 
@@ -216,16 +294,26 @@ ParsedProbeResult ParseProbeResultJson(std::string_view json) {
             return result;
         }
 
+        cid = Uppercase(std::move(cid));
+        if (!audioCids.insert(cid).second) {
+            if (result.protocolStatus != "partial") {
+                result.error = "Duplicate audio class CID in a non-partial probe response: " + cid;
+                return result;
+            }
+            continue;
+        }
+
         InventoryRecord record;
-        record.cid = Uppercase(std::move(cid));
+        record.cid = std::move(cid);
         record.name = std::move(name);
         record.vendor = vendor.empty() ? result.factoryVendor : std::move(vendor);
         record.version = std::move(version);
+        record.versionMissing = versionMissing;
         record.sdkVersion = std::move(sdkVersion);
         record.subCategories = std::move(parsedSubCategories);
         record.modulePath = result.modulePath;
         record.protocolStatus = result.protocolStatus;
-        record.diagnostic = std::move(diagnostic);
+        record.diagnostic = diagnostic.empty() ? result.diagnostic : std::move(diagnostic);
         record.probeDurationMs = result.probeDurationMs;
         result.audioPlugins.push_back(std::move(record));
     }
@@ -325,23 +413,25 @@ void MarkCidDuplicates(std::vector<InventoryRecord>& records) {
 std::string SerializeInventoryCsv(const std::vector<InventoryRecord>& records,
                                   const std::vector<ScanIssue>& issues) {
     std::ostringstream output;
-    output << "Plugin;Hersteller;Version;SDK-Version;Kategorie;Modul;Modulpfad;"
-              "Dublette;Cache;Status;Dauer (ms);Diagnose\r\n";
+    output << "Plugin;Vendor;Version;Version source;SDK version;Category;Module;Module path;"
+              "Duplicate;Cache;Status;Duration (ms);Diagnostic\r\n";
     for (const auto& record : records) {
         output << CsvEscape(record.name) << ';' << CsvEscape(record.vendor) << ';'
-               << CsvEscape(record.version) << ';' << CsvEscape(record.sdkVersion) << ';'
+               << CsvEscape(record.version) << ';'
+               << (record.versionMissing ? "Not reported" : "VST3 factory") << ';'
+               << CsvEscape(record.sdkVersion) << ';'
                << CsvEscape(Join(record.subCategories, '|')) << ';'
                << CsvEscape(FileNameFromPath(record.modulePath)) << ';'
                << CsvEscape(record.modulePath) << ';'
-               << (record.duplicate ? "ja (" + std::to_string(record.duplicateCount) + ')' : "nein")
-               << ';' << (record.fromCache ? "ja" : "nein") << ';'
+               << (record.duplicate ? "Yes (" + std::to_string(record.duplicateCount) + ')' : "No")
+               << ';' << (record.fromCache ? "Yes" : "No") << ';'
                << CsvEscape(record.protocolStatus) << ';' << record.probeDurationMs << ';'
                << CsvEscape(record.diagnostic) << "\r\n";
     }
     for (const auto& issue : issues) {
         const auto module = FileNameFromPath(issue.modulePath);
-        output << CsvEscape("[Problem] " + module) << ";;;;;" << CsvEscape(module) << ';'
-               << CsvEscape(issue.modulePath) << ";nein;nein;" << CsvEscape(issue.status)
+        output << CsvEscape("[Problem] " + module) << ";;;;;;" << CsvEscape(module) << ';'
+               << CsvEscape(issue.modulePath) << ";No;No;" << CsvEscape(issue.status)
                << ";;" << CsvEscape(issue.diagnostic) << "\r\n";
     }
     return output.str();
@@ -358,6 +448,7 @@ std::string SerializeInventoryJson(const std::vector<InventoryRecord>& records,
         output << ",\"name\":"; WriteJsonString(output, record.name);
         output << ",\"vendor\":"; WriteJsonString(output, record.vendor);
         output << ",\"version\":"; WriteJsonString(output, record.version);
+        output << ",\"versionMissing\":" << (record.versionMissing ? "true" : "false");
         output << ",\"sdkVersion\":"; WriteJsonString(output, record.sdkVersion);
         output << ",\"subCategories\":[";
         for (std::size_t category = 0; category < record.subCategories.size(); ++category) {

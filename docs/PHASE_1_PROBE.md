@@ -1,60 +1,59 @@
 # Phase 1: Vst3MetadataProbe
 
-## Sicherheitsgrenze
+## Security boundary
 
-`Vst3MetadataProbe.exe` ist die einzige Komponente, die fremden VST3-Code lädt.
-Sie bearbeitet exakt einen Pfad und beendet sich danach. Die spätere Hauptanwendung
-darf diesen Code nicht linken und startet für jedes Modul einen neuen Probe-Prozess.
+`Vst3MetadataProbe.exe` is the only component that loads third-party VST3 code.
+It processes exactly one path and then exits. The main application must not link
+this code and starts a new probe process for every module.
 
-Die Probe verwendet `VST3::Hosting::Module::create` und Steinbergs
-`module_win32.cpp`. Sie fragt ausschließlich folgende Metadaten-Schnittstellen ab:
+The probe uses `VST3::Hosting::Module::create` and Steinberg's
+`module_win32.cpp`. It queries only these metadata interfaces:
 
 1. `IPluginFactory::getFactoryInfo`
 2. `IPluginFactory::countClasses`
 3. `IPluginFactory3::getClassInfoUnicode`
-4. ersatzweise `IPluginFactory2::getClassInfo2`
-5. ersatzweise `IPluginFactory::getClassInfo`
+4. `IPluginFactory2::getClassInfo2` as the first fallback
+5. `IPluginFactory::getClassInfo` as the final fallback
 
-Sie ruft `createInstance` nicht auf. Es werden keine Komponenten, Controller,
-Editoren oder Audioprozessoren erzeugt oder initialisiert.
+It never calls `createInstance`. No components, controllers, editors, or audio
+processors are created or initialized.
 
-## stdout und stderr
+## stdout and stderr
 
-- `stdout`: genau ein kompaktes UTF-8-JSON-Dokument und abschließender Zeilenumbruch
-- `stderr`: Diagnose in menschenlesbarer Form, falls vorhanden
-- Ungültige UTF-8-Bytes aus fremden Factory-Daten werden im JSON durch U+FFFD ersetzt.
-- JSON-Strings maskieren Anführungszeichen, Backslashes und Steuerzeichen.
+- `stdout`: exactly one compact UTF-8 JSON document followed by a newline
+- `stderr`: human-readable diagnostics, when available
+- Invalid UTF-8 bytes from third-party factory data are replaced with U+FFFD in JSON.
+- JSON strings escape quotation marks, backslashes, and control characters.
 
-## Statuswerte
+## Status values
 
-| Status | Bedeutung | Exitcode |
+| Status | Meaning | Exit code |
 | --- | --- | ---: |
-| `ok` | Factory und alle Klasseninformationen gelesen | 0 |
-| `partial` | Modul gelesen, mindestens ein Metadatenaufruf fehlgeschlagen | 0 |
-| `protocol_error` | Argument- oder unerwarteter interner Fehler | 2 |
-| `not_vst3` | Kandidat ist kein VST3-Modul | 3 |
-| `access_error` | Pfad konnte nicht gelesen werden | 3 |
-| `wrong_architecture` | Modul passt nicht zur x64-Probe | 4 |
-| `load_error` | Steinberg-Modullader konnte das Modul nicht laden | 4 |
-| `factory_missing` | Keine Plugin-Factory verfügbar | 5 |
-| `factory_error` | Factory lieferte ungültige Basisdaten | 5 |
-| `no_classes` | Factory meldet null Klassen | 6 |
-| `timeout` | Wird später vom aufrufenden Scanner erzeugt | 7 |
-| `crashed` | Wird später vom aufrufenden Scanner erzeugt | 7 |
+| `ok` | Factory and all class information read successfully | 0 |
+| `partial` | Module read, but at least one metadata call failed | 0 |
+| `protocol_error` | Argument error or unexpected internal error | 2 |
+| `not_vst3` | Candidate is not a VST3 module | 3 |
+| `access_error` | Path could not be read | 3 |
+| `wrong_architecture` | Module architecture does not match the x64 probe | 4 |
+| `load_error` | Steinberg module loader could not load the module | 4 |
+| `factory_missing` | No plug-in factory is available | 5 |
+| `factory_error` | Factory returned invalid basic data | 5 |
+| `no_classes` | Factory reports zero classes | 6 |
+| `timeout` | Generated later by the supervising scanner | 7 |
+| `crashed` | Generated later by the supervising scanner | 7 |
 
-Phase 1 erzeugt selbst noch keine Statuswerte `timeout` oder `crashed`, weil diese
-nur ein überwachender Elternprozess zuverlässig feststellen kann. `not_vst3`,
-`access_error` und `wrong_architecture` werden in einer späteren Phase anhand des
-Kandidaten- und Prozessstatus weiter differenziert; ein aktueller Ladefehler bleibt
-bewusst als `load_error` erhalten.
+Phase 1 does not itself produce `timeout` or `crashed`, because only a supervising
+parent process can determine those states reliably. A current loader failure is
+intentionally preserved as `load_error`; later phases can further distinguish
+`not_vst3`, `access_error`, and `wrong_architecture` from candidate and process data.
 
-## JSON-Felder
+## JSON fields
 
-### Modul
+### Module
 
-| Feld | Quelle |
+| Field | Source |
 | --- | --- |
-| `path` | unverändertes UTF-8-Kommandozeilenargument |
+| `path` | Unmodified UTF-8 command-line argument |
 | `name` | `VST3::Hosting::Module::getName()` |
 | `isBundle` | `VST3::Hosting::Module::isBundle()` |
 | `factoryVendor` | `PFactoryInfo::vendor` |
@@ -62,50 +61,50 @@ bewusst als `load_error` erhalten.
 | `factoryEmail` | `PFactoryInfo::email` |
 | `factoryFlags` | `PFactoryInfo::flags` |
 | `classCount` | `IPluginFactory::countClasses()` |
-| `probeDurationMs` | monotone Prozessmessung um Laden und Factory-Abfrage |
+| `probeDurationMs` | Monotonic process timing around module load and factory query |
 
-### Klasse
+### Class
 
-| Feld | Quelle |
+| Field | Source |
 | --- | --- |
-| `index` | Factory-Klassenindex |
-| `cid` | SDK-`UID::toString()`, 32 großgeschriebene Hex-Zeichen |
-| `cardinality` | ClassInfo-Cardinality |
-| `category` | ClassInfo-Category |
-| `name` | ClassInfo-Name |
-| `classFlags` | ClassInfo-Flags, bei Factory1 `0` |
-| `subCategories` | unveränderte, am SDK-Trennzeichen `|` getrennte Werte |
-| `vendor` | ClassInfo-Vendor, kein Factory-Fallback |
-| `version` | roher ClassInfo-Versionsstring, kein Fallback und keine Normalisierung |
-| `sdkVersion` | roher ClassInfo-SDK-Versionsstring |
-| `factoryInterface` | tatsächlich erfolgreiche Schnittstelle `3`, `2` oder `1` |
-| `isAudioPlugin` | exakter Vergleich mit `Audio Module Class` |
-| `versionMissing` | `true`, wenn der rohe Versionsstring leer ist |
-| `diagnostic` | Fehler für genau diesen Index |
+| `index` | Factory class index |
+| `cid` | SDK `UID::toString()`, 32 uppercase hexadecimal characters |
+| `cardinality` | ClassInfo cardinality |
+| `category` | ClassInfo category |
+| `name` | ClassInfo name |
+| `classFlags` | ClassInfo flags; `0` for Factory1 |
+| `subCategories` | Raw values split at the SDK `|` separator |
+| `vendor` | ClassInfo vendor; no factory fallback in the probe |
+| `version` | Raw ClassInfo version; no fallback or normalization |
+| `sdkVersion` | Raw ClassInfo SDK version |
+| `factoryInterface` | Successfully used interface: `3`, `2`, or `1` |
+| `isAudioPlugin` | Exact comparison with `Audio Module Class` |
+| `versionMissing` | `true` when the raw version string is empty |
+| `diagnostic` | Error for this exact index |
 
-Falls alle drei ClassInfo-Abfragen an einem Index fehlschlagen, wird der Index nicht
-übersprungen. Stattdessen enthält `classes` einen leeren Fehlerdatensatz und der
-Gesamtstatus lautet `partial`.
+If all three ClassInfo queries fail for an index, the index is not skipped.
+Instead, `classes` contains an empty error record and the overall status is
+`partial`.
 
-## Verifizierter Phase-1-Test
+## Verified Phase 1 test
 
-Der x64-Release-Build wurde lokal mit `bitcrust.vst3` getestet:
+The x64 release build was tested locally with `bitcrust.vst3`:
 
 - Status: `ok`
-- Factory-Hersteller: `Anode Labs`
-- exportierte Klassen: `3`
-- erfolgreiche Factory-Schnittstelle je Klasse: `IPluginFactory3`
-- gemeldete Klassenversion: `1.0.8`
-- gemeldete SDK-Version: `VST 3.7.12`
-- Audio-Plugin-Klassen: `1`
-- Laufzeit des abschließenden Testlaufs: `9 ms`
+- Factory vendor: `Anode Labs`
+- Exported classes: `3`
+- Successful factory interface per class: `IPluginFactory3`
+- Reported class version: `1.0.8`
+- Reported SDK version: `VST 3.7.12`
+- Audio plug-in classes: `1`
+- Duration of the final test run: `9 ms`
 
-Dieser Befund ist keine vollständige Pluginvalidierung. Er bestätigt nur Laden,
-Factory-Abfrage, Multi-Class-Modell und JSON-Protokoll von Phase 1.
+This is not a complete plug-in validation. It confirms module loading, factory
+queries, the multi-class model, and the Phase 1 JSON protocol only.
 
-## Folgestand
+## Current follow-up state
 
-Die Probe wurde inzwischen erfolgreich mit normalen kommerziellen VST3-Modulen und
-einem Waves-Shell-Modul geprüft. Der GUI-Batchscanner ist implementiert und startet
-weiterhin für jeden Kandidaten einen getrennten Probe-Prozess. Der noch ausstehende
-offizielle Steinberg-Beispieltest bleibt ein zusätzlicher Referenztest.
+The probe has since been tested successfully with regular commercial VST3
+modules and a Waves shell module. The GUI folder scanner is implemented and
+continues to start a separate probe process for every candidate. Testing against
+an official Steinberg sample remains an additional reference test.

@@ -1,82 +1,96 @@
 # VST3 Plugin Scanner for Windows
 
-Technische Machbarkeitsstudie für einen zuverlässigen, nativen VST3-Inventarscanner.
-Der Neustart verwendet das offizielle Steinberg VST3 SDK und behandelt ein VST3-Modul
-als Container für null, eine oder mehrere exportierte Factory-Klassen.
+Technical proof of concept for a reliable native VST3 inventory scanner. The
+current implementation uses the official Steinberg VST3 SDK and treats a VST3
+module as a container for zero, one, or multiple exported factory classes.
 
-Der vorherige passive C++-Scanner ist unverändert über den Tag
-`cpp-v1.1.0-pre-restart` verfügbar. Seine Heuristiken und Windows-Dateiversionen
-fließen nicht in die Ergebnisse dieser Studie ein.
+The previous passive C++ scanner remains available unchanged under the
+`cpp-v1.1.0-pre-restart` tag. Its heuristics and Windows file-version data are
+not used by the current scanner.
 
-## Aktueller Stand: Inventar und optionaler Cache (2.3.0)
+## Current state: validated VST3 inventory (2.4.0)
 
-Der Branch baut eine isolierte x64-Metadatenprobe und eine native Win32-GUI:
+This branch builds an isolated x64 metadata probe and a native Win32 GUI:
 
 ```text
-Vst3MetadataProbe.exe "C:\Pfad\Plugin.vst3"
+Vst3MetadataProbe.exe "C:\Path\Plugin.vst3"
 Vst3ProbeGui.exe
 ```
 
-Die GUI scannt einzelne Module oder komplette Ordner. `.vst3`-Bundle-Verzeichnisse
-werden vom Ordnerscan automatisch als einzelne Module erkannt. Jeder nicht
-zwischengespeicherte Kandidat laeuft in einem eigenen Probe-Prozess. Der erste
-Versuch ist auf 15 Sekunden begrenzt; nur nach Timeout folgt genau eine
-Wiederholung mit maximal 30 Sekunden.
+The GUI scans individual modules or entire folders. Folder scans recognize
+`.vst3` bundle directories as single modules. Every uncached candidate runs in
+its own probe process. The initial attempt is limited to 15 seconds; a timeout
+causes exactly one retry with a 30-second limit.
 
-Version 2.3.0 bietet:
+Version 2.4.0 provides:
 
-- strikte Validierung des JSON-Protokolls und `protocol_error` bei leerer Ausgabe;
-- eine sortierbare Tabelle fuer `Audio Module Class`-Eintraege;
-- CID-basierte Dublettenerkennung ueber verschiedene Modulpfade;
-- einen standardmaessig deaktivierten, optionalen Einzeldatei-Cache
-  `vst3_scanner_cache.json` neben der EXE mit Inhaltsfingerprint der Modulbinaerdatei;
-- statisch eingebundene MSVC-Runtimes fuer eine portable Release-Ausgabe;
-- harmonisierte Fenster- und CSV-Spalten mit UTF-8-BOM und Semikolon;
-- strukturierten JSON-Export;
-- aufgeloeste Multi-Plugin-Module wie WaveShells als eine Zeile je Audioklasse;
-- Problemzeilen fuer Ladefehler, `no_classes`, Timeouts und Dateisystemwarnungen;
-- begrenztes Prozess-Warten mit Fehlermeldung statt blockierender Pipe-Threads;
-- eingeschraenkte Handle-Vererbung sowie eigene Diagnosen fuer abgestuerzte Probes.
+- strict JSON protocol validation and `protocol_error` for empty output;
+- a sortable inventory table for `Audio Module Class` entries;
+- CID-based duplicate detection across different module paths;
+- an optional single-file cache, disabled by default, stored as
+  `vst3_scanner_cache.json` next to the GUI executable and keyed by a content
+  fingerprint of the module binaries;
+- statically linked MSVC runtimes for portable release binaries;
+- matching GUI and CSV columns, with UTF-8 BOM and semicolon separators;
+- CSV formula-injection protection for untrusted plug-in metadata;
+- structured JSON export;
+- expansion of multi-plug-in modules such as WaveShells into one row per audio
+  class;
+- an explicit version source: `VST3 factory` or `Not reported`;
+- strict consistency checks for class count, class index, factory interface,
+  CID, and `versionMissing`;
+- exactly one inventory row per audio CID and module, including faulty factory
+  responses;
+- issue rows for load errors, `no_classes`, timeouts, and file-system warnings;
+- bounded process waits instead of blocking pipe-reader threads;
+- restricted handle inheritance and dedicated diagnostics for crashed probes;
+- a Windows manifest for Common Controls v6, Per-Monitor V2 DPI awareness, and
+  long-path support.
 
-Controller-, Compatibility- und ARA-Hilfsklassen werden nicht als Plugins gezaehlt.
-Ein leerer Klassenhersteller darf ausschliesslich durch den Hersteller derselben
-VST3-Factory ersetzt werden. Versionswerte werden nie heuristisch veraendert.
+Controller, compatibility, and ARA helper classes are not counted as plug-ins.
+An empty class vendor may only be replaced by the vendor from the same VST3
+factory. Version strings are never changed heuristically. `VST3 factory` means
+that the displayed raw value came directly from `IPluginFactory3` or
+`IPluginFactory2`; it does not indicate whether a newer version is available
+from the vendor.
 
-Die Probe:
+The probe:
 
-- untersucht genau ein Modul pro Prozess;
-- laedt das Modul mit Steinbergs offiziellem Windows-Hosting-Loader;
-- ruft nur die Plugin-Factory und deren Metadaten ab;
-- verwendet `IPluginFactory3`, ersatzweise `IPluginFactory2`, ersatzweise `IPluginFactory`;
-- erzeugt keine Plugininstanz und ruft weder `initialize` noch Audio- oder GUI-Funktionen auf;
-- gibt genau ein UTF-8-JSON-Dokument auf `stdout` aus;
-- schreibt Diagnosen ausschliesslich auf `stderr`;
-- laesst leere oder ungewoehnliche Versionsstrings unveraendert sichtbar.
+- examines exactly one module per process;
+- loads it through Steinberg's official Windows hosting loader;
+- queries only the plug-in factory and its metadata;
+- uses `IPluginFactory3`, falling back to `IPluginFactory2`, then
+  `IPluginFactory`;
+- never creates a plug-in instance or calls `initialize`, audio, or GUI methods;
+- writes exactly one UTF-8 JSON document to `stdout`;
+- writes human-readable diagnostics only to `stderr`;
+- preserves empty or unusual version strings exactly as reported.
 
-Zur Ausfuehrung werden weder das Steinberg VST3 SDK noch das Microsoft Visual C++
-Redistributable benoetigt. `Vst3ProbeGui.exe` und `Vst3MetadataProbe.exe` muessen
-gemeinsam im selben Verzeichnis bleiben.
+Neither the Steinberg VST3 SDK nor the Microsoft Visual C++ Redistributable is
+required at runtime. `Vst3ProbeGui.exe` and `Vst3MetadataProbe.exe` must remain
+in the same directory.
 
-Weitere GUI- und Cache-Details stehen in
-[`docs/RUDIMENTARY_GUI.md`](docs/RUDIMENTARY_GUI.md).
-## Voraussetzungen
+See [GUI, inventory, and folder scanning](docs/RUDIMENTARY_GUI.md) for the GUI
+and cache details.
 
-- Windows 10 oder Windows 11 x64
-- Visual Studio 2022 Build Tools mit MSVC v143 und Windows SDK
-- CMake 3.25 oder neuer
-- Git mit Submodule-Unterstützung
+## Requirements
 
-Das SDK ist als rekursives Git-Submodule eingebunden und auf
-`v3.8.0_build_66` (`9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`) fixiert.
+- Windows 10 or Windows 11 x64
+- Visual Studio 2022 Build Tools with MSVC v143 and a Windows SDK
+- CMake 3.25 or newer
+- Git with submodule support
 
-## Sauberer Checkout
+The SDK is included as a recursive Git submodule pinned to
+`v3.8.0_build_66` (`9fad9770f2ae8542ab1a548a68c1ad1ac690abe0`).
+
+## Clean checkout
 
 ```powershell
 git clone --recurse-submodules https://github.com/sscheidl/vst3-plugin-scanner.git
 cd vst3-plugin-scanner
 ```
 
-Bei einem bereits vorhandenen Checkout:
+For an existing checkout:
 
 ```powershell
 git submodule update --init --recursive
@@ -90,22 +104,21 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Ergebnis:
+Output:
 
 ```text
 build\bin\Release\Vst3MetadataProbe.exe
 build\bin\Release\Vst3ProbeGui.exe
 ```
 
-Beide EXE-Dateien müssen im selben Verzeichnis bleiben. Weitere Details stehen in
-[`docs/RUDIMENTARY_GUI.md`](docs/RUDIMENTARY_GUI.md).
+Both executables must remain in the same directory.
 
-## Prozessprotokoll
+## Process protocol
 
-Das JSON-Schema hat aktuell Version `2`. Eine erfolgreiche Antwort enthält
-Moduldaten sowie einen Eintrag für jeden von der Factory gemeldeten Klassenindex.
-Wichtige unverfälschte Felder sind `version` und `sdkVersion`; intern heißen sie
-`ClassVersionRaw` und `SdkVersionRaw`.
+The current JSON schema version is `2`. A successful response contains module
+data and one entry for every class index reported by the factory. Important raw
+fields include `version` and `sdkVersion`; internally they are named
+`ClassVersionRaw` and `SdkVersionRaw`.
 
 ```json
 {
@@ -135,10 +148,10 @@ Wichtige unverfälschte Felder sind `version` und `sdkVersion`; intern heißen s
 }
 ```
 
-Die vollständige Feld- und Statusbeschreibung steht in
-[`docs/PHASE_1_PROBE.md`](docs/PHASE_1_PROBE.md).
+See [Phase 1: Vst3MetadataProbe](docs/PHASE_1_PROBE.md) for the complete field
+and status reference.
 
-## Lizenz
+## License
 
-Die SDK-Quellen bleiben im offiziellen Steinberg-Submodule und unterliegen dessen
-Lizenzdateien. Der Scanner kopiert oder verändert keine Plugin-Dateien.
+The SDK sources remain in the official Steinberg submodule and are governed by
+its license files. The scanner does not copy or modify plug-in files.

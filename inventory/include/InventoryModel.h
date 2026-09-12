@@ -13,6 +13,7 @@ struct InventoryRecord {
     std::string name;
     std::string vendor;
     std::string version;
+    bool versionMissing = true;
     std::string sdkVersion;
     std::vector<std::string> subCategories;
     std::string modulePath;

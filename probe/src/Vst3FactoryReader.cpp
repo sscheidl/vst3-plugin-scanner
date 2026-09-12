@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <unordered_set>
 
 namespace vst3scanner {
 namespace {
@@ -106,29 +107,38 @@ ProbeResult ProbeVst3Module(const std::string& modulePathUtf8) {
     const auto factory3 = Steinberg::U::cast<Steinberg::IPluginFactory3>(factoryPointer);
     const auto factory2 = Steinberg::U::cast<Steinberg::IPluginFactory2>(factoryPointer);
     result.classes.reserve(static_cast<std::size_t>(classCount));
+    std::unordered_set<std::string> classIds;
+
+    const auto appendClass = [&](Vst3ClassData pluginClass) {
+        if (!pluginClass.cid.empty() && !classIds.insert(pluginClass.cid).second) {
+            partial = true;
+            pluginClass.diagnostic = "The factory returned this class CID more than once.";
+            AppendDiagnostic(result.diagnostic,
+                             "Duplicate class CID at index " +
+                                 std::to_string(pluginClass.index) + ": " + pluginClass.cid + '.');
+        }
+        result.classes.push_back(std::move(pluginClass));
+    };
 
     for (Steinberg::int32 index = 0; index < classCount; ++index) {
         if (factory3) {
             Steinberg::PClassInfoW info{};
             if (factory3->getClassInfoUnicode(index, &info) == Steinberg::kResultOk) {
-                result.classes.push_back(ConvertClassInfo(
-                    index, 3, VST3::Hosting::ClassInfo(info)));
+                appendClass(ConvertClassInfo(index, 3, VST3::Hosting::ClassInfo(info)));
                 continue;
             }
         }
         if (factory2) {
             Steinberg::PClassInfo2 info{};
             if (factory2->getClassInfo2(index, &info) == Steinberg::kResultOk) {
-                result.classes.push_back(ConvertClassInfo(
-                    index, 2, VST3::Hosting::ClassInfo(info)));
+                appendClass(ConvertClassInfo(index, 2, VST3::Hosting::ClassInfo(info)));
                 continue;
             }
         }
 
         Steinberg::PClassInfo info{};
         if (factoryPointer->getClassInfo(index, &info) == Steinberg::kResultOk) {
-            result.classes.push_back(ConvertClassInfo(
-                index, 1, VST3::Hosting::ClassInfo(info)));
+            appendClass(ConvertClassInfo(index, 1, VST3::Hosting::ClassInfo(info)));
             continue;
         }
 
