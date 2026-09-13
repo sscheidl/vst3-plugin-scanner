@@ -1,96 +1,67 @@
-# Windows VST Plugin Scanner - aktueller Stand
+# Project status
 
-Stand: 2026-08-01
-Version: 1.1.0.0
+Date: 2026-09-12
+Version: 2.4.0
+Branch: `restart/vst3-sdk-probe`
 
-## Kurzfassung
+## Active scanner
 
-Native Windows-Anwendung in C++20/Win32 fuer Windows 11 x64. Sie scannt VST2,
-VST3, CLAP und AAX, ohne Plugin-Binaries im Scannerprozess zu laden oder zu
-initialisieren.
+The active codebase is a native Windows x64 VST3 scanner consisting of:
 
-Repository: `https://github.com/sscheidl/vst3-plugin-scanner`
+- `Vst3ProbeGui.exe`: Win32 interface, recursive folder scan, sorting, and export;
+- `Vst3MetadataProbe.exe`: isolated process for exactly one VST3 module;
+- the official Steinberg VST3 SDK as a pinned Git submodule;
+- a strictly validated JSON protocol between the GUI and the probe.
 
-## Versionsaufloesung
+The probe queries factory and ClassInfo metadata only. It does not create a
+plug-in instance or modify plug-in files. Version, vendor, name, CID, categories,
+and SDK version come directly from the VST3 factory. No version or vendor
+heuristics are used.
 
-Prioritaet der installierten Versionsnummer:
+The parser validates the complete schema-2 structure, including agreement
+between `classCount` and the class array, and between `version` and
+`versionMissing`. The table and both export formats show whether the factory
+reported a version. Repeated audio CIDs from the same module are not counted
+more than once.
 
-1. Zukuenftige isolierte VST3-SDK-Probe (aktuell deaktivierter Stub).
-2. Top-Level-`Version` aus VST3 `moduleinfo.json`.
-3. Windows `ProductVersion`.
-4. Windows `FileVersion`.
-5. Numerische Produkt-/Dateiversion aus `VS_FIXEDFILEINFO`.
-6. Eindeutiges Versionsmuster im Dateinamen, als Heuristik markiert.
-7. Benutzerregel oder manuelle Eingabe kann das Ergebnis gezielt ueberschreiben.
+## Safety and behavior
 
-GUI und Reports zeigen die Versionsquelle. Die Zusammenfassung unterscheidet
-zuverlaessig erkannte, heuristische und fehlende Versionen. Versionswerte werden
-normalisiert und numerisch verglichen.
+- Every module runs in its own Windows Job Object.
+- Initial timeout: 15 seconds; exactly one retry with a 30-second limit.
+- Stop, timeout, and window close terminate the entire probe process tree.
+- Only the three standard handles are inherited by the probe process.
+- Crashes and inconsistent process responses have dedicated diagnostics.
+- A failed process termination cannot block the GUI indefinitely.
+- `.vst3` files and bundle directories are discovered recursively.
+- Directory symlinks are not followed.
 
-## Audit und Haertung 2026-08-01
+## Cache and export
 
-- Speicherueberlauf in UTF-8-/UTF-16-Konvertierung behoben.
-- Ungueltige UTF-8-Sequenzen werden kontrolliert abgewiesen.
-- `VERSIONINFO`-Strings werden innerhalb der gemeldeten Puffergroesse gelesen.
-- Alle vorhandenen Sprach-/Codepage-Tabellen werden durchsucht.
-- Numerischer `VS_FIXEDFILEINFO`-Fallback ergaenzt.
-- `moduleinfo.json` wird strukturell ausgewertet; Klassen-Versionen koennen die
-  Top-Level-Modulversion nicht mehr versehentlich ersetzen.
-- JSON5-Kommentare und nachgestellte Kommata werden fuer relevante Felder toleriert.
-- Metadatendateien sind auf 4 MiB begrenzt.
-- VST3-Binary-Aufloesung ist deterministisch und kennt `x86_64-win`, `x64-win`,
-  `arm64ec-win`, `arm64-win`, `x86-win` und `arm-win`.
-- VST2-PE-Pruefung nutzt Read-only File Mapping statt kompletter Dateikopie.
-- PE-Header, RVA-Umrechnung und Exporttabellen sind gegen Ueberlaeufe gehaertet.
-- Worker-Ausnahmen und Fehler beim Threadstart werden in der GUI behandelt.
-- Fehlgeschlagene `PostMessage`-Aufrufe verlieren keinen Heap-Speicher.
+The optional cache is disabled by default. When enabled, the only cache file is
+`vst3_scanner_cache.json` next to the GUI executable. A cache hit requires an
+unchanged path, file sizes, and modification times. The content of VST3/DLL
+binaries and `moduleinfo.json` is hashed as well. Only successful, revalidated
+probe responses are stored.
 
-## Tests und Build
+The GUI table and CSV use the same column order. Multi-plug-in modules such as
+WaveShells appear as one row per audio class with a shared module file. CID
+remains available internally for duplicate detection and in JSON, but is hidden
+from the GUI and CSV. CSV uses a UTF-8 BOM, semicolon separators, and neutralizes
+formula-like values from untrusted metadata.
 
-- Visual-Studio-Release-Build: erfolgreich, 0 Warnungen, 0 Fehler.
-- CTest `VersionUtilTests`: erfolgreich.
-- CTest `MetadataReaderTests`: erfolgreich.
-- Getestet werden Parsing, Normalisierung, Vergleich, Windows-Ressourcen,
-  VST3-Modulmetadaten und Dateinamen-Fallback.
+The GUI manifest enables Common Controls v6, Per-Monitor V2 DPI awareness, and
+long-path support. Controls use the DPI-aware system message font where available.
 
-Build:
+## Historical codebase
 
-```powershell
-.\build_release.ps1
-```
+The previous passive C++ scanner is preserved under the
+`cpp-v1.1.0-pre-restart` tag. Its heuristics and old project files are not part
+of the active branch.
 
-Tests:
+## Real-world reference tests for 2.4.0
 
-```powershell
-cmake -S . -B build -A x64 -DBUILD_TESTING=ON
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
-
-## Steinberg SDK
-
-Die offizielle SDK-Struktur kann bereits optional ueber CMake validiert werden.
-`IVst3SdkProbe` trennt den Scanner von einer spaeteren Implementierung. Die echte
-Probe muss als separater Prozess mit Timeout und Crash-Isolation gebaut werden.
-
-Details: `docs/VST3_SDK_INTEGRATION.md`
-
-## Verbleibende Grenzen
-
-- Die echte Steinberg-SDK-Probe ist noch nicht implementiert.
-- `moduleinfo.json` ist optional und bei vielen aelteren Plugins nicht vorhanden.
-- Hersteller koennen Windows-Ressourcen falsch oder gar nicht pflegen.
-- Ein VST3-Bundle kann mehrere Plugin-Klassen mit verschiedenen Versionen enthalten;
-  aktuell bleibt es ein Scanner-Datensatz pro Bundle.
-- Der lokale Parser deckt die benoetigten JSON5-Felder ab, ist aber kein vollstaendiger
-  allgemeiner JSON5-Parser.
-- Eine Online-Pruefung auf Hersteller-Websites ist noch nicht implementiert.
-- Dateinamen-Versionen sind bewusst nur Heuristik und gelten nicht als sicher.
-
-## Naechste sinnvolle Etappen
-
-1. Aus Scanreports messen, bei welchen Herstellern/Plugins Versionen noch fehlen.
-2. Isolierten `Vst3MetadataProbe.exe` mit Steinberg SDK implementieren.
-3. Datenmodell auf mehrere VST3-Klassen pro Bundle erweitern.
-4. Herstelleradapter fuer Online-Versionen mit Cache, Rate-Limit und Quellen-URL bauen.
-5. Installierte und verfuegbare Version mit `CompareVersionStrings` vergleichen.
+- WaveShell 17.1: four audio classes with four reported version values;
+- WaveShell 12.7, 16.0, and 16.7: factory loads but exports zero classes;
+- Guitar Rig 7: valid audio class after approximately 13.6 seconds;
+- Komplete Kontrol: valid audio class after approximately 15 seconds, making it
+  an expected candidate for the single 30-second retry.
