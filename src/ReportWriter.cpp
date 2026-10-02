@@ -9,25 +9,40 @@
 namespace {
 
 bool WriteUtf8File(const std::filesystem::path& path, const std::wstring& content, bool withBom, std::wstring& errorMessage) {
+    // WideToUtf8 returns an empty string when the input contains unpaired
+    // surrogates, which can come from broken file names. Detect that before the
+    // file is touched, so a failed conversion can never produce an empty report
+    // that still reports success.
+    const std::string bytes = WideToUtf8(content);
+    if (bytes.empty() && !content.empty()) {
+        errorMessage = L"Report contains characters that cannot be encoded as UTF-8: " + path.wstring();
+        return false;
+    }
+
     std::ofstream stream(path, std::ios::binary);
     if (!stream) {
-        errorMessage = L"Ausgabedatei konnte nicht geoeffnet werden: " + path.wstring();
+        errorMessage = L"Output file could not be opened: " + path.wstring();
         return false;
     }
     if (withBom) {
         const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
         stream.write(reinterpret_cast<const char*>(bom), sizeof(bom));
     }
-    const std::string bytes = WideToUtf8(content);
     stream.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    return stream.good();
+    stream.flush();
+    stream.close();
+    if (!stream.good()) {
+        errorMessage = L"Output file could not be written completely: " + path.wstring();
+        return false;
+    }
+    return true;
 }
 
 std::wstring DuplicateText(const PluginRecord& record) {
     if (!record.isPossibleDuplicate) {
-        return L"Nein";
+        return L"No";
     }
-    return L"Ja (Gruppe " + std::to_wstring(record.duplicateGroupId) + L")";
+    return L"Yes (group " + std::to_wstring(record.duplicateGroupId) + L")";
 }
 
 std::wstring DateSortValue(const std::wstring& value) {
@@ -85,7 +100,7 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
                              const ScanSummary& summary,
                              std::wstring& errorMessage) const {
     std::wstringstream html;
-    html << L"<!doctype html>\n<html lang=\"de\">\n<head>\n<meta charset=\"utf-8\">\n";
+    html << L"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n";
     html << L"<title>VST Plugin Scan Report</title>\n";
     html << L"<style>\n";
     html << L"body{font-family:Segoe UI,Arial,sans-serif;margin:24px;background:#f6f7f9;color:#1f2328;}";
@@ -99,20 +114,20 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
     html << L".sort-indicator{display:inline-block;min-width:1em;color:#57606a;}.warn{color:#9a6700;}code{font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;}";
     html << L"</style>\n</head>\n<body>\n";
     html << L"<h1>VST Plugin Scan Report</h1>\n";
-    html << L"<div class=\"summary\"><strong>Zusammenfassung</strong><br>";
-    html << L"Scanzeitpunkt: " << HtmlEscape(summary.scanTimestamp) << L"<br>";
-    html << L"Anzahl VST2: " << summary.vst2Count << L"<br>";
-    html << L"Anzahl VST3: " << summary.vst3Count << L"<br>";
-    html << L"Anzahl CLAP: " << summary.clapCount << L"<br>";
-    html << L"Anzahl AAX: " << summary.aaxCount << L"<br>";
-    html << L"Dubletten-Gruppen: " << summary.duplicateCount << L"<br>";
-    html << L"Dubletten-Eintraege: " << summary.duplicateEntryCount << L"<br>";
-    html << L"VST2-Dubletten loeschbar: " << summary.vst2DuplicateCandidateCount << L"<br>";
-    html << L"Version zuverlaessig ermittelt: " << summary.versionDetectedCount << L"<br>";
-    html << L"Version heuristisch aus Dateiname: " << summary.versionHeuristicCount << L"<br>";
-    html << L"Version fehlt: " << summary.versionMissingCount << L"<br>";
-    html << L"Fehler/Warnungen: " << summary.warningCount << L"<br>";
-    html << L"Gescannte Pfade: " << HtmlEscape(JoinPathList(summary.scannedPaths)) << L"</div>\n";
+    html << L"<div class=\"summary\"><strong>Summary</strong><br>";
+    html << L"Scan time: " << HtmlEscape(summary.scanTimestamp) << L"<br>";
+    html << L"VST2 count: " << summary.vst2Count << L"<br>";
+    html << L"VST3 count: " << summary.vst3Count << L"<br>";
+    html << L"CLAP count: " << summary.clapCount << L"<br>";
+    html << L"AAX count: " << summary.aaxCount << L"<br>";
+    html << L"Duplicate groups: " << summary.duplicateCount << L"<br>";
+    html << L"Duplicate entries: " << summary.duplicateEntryCount << L"<br>";
+    html << L"Deletable VST2 duplicates: " << summary.vst2DuplicateCandidateCount << L"<br>";
+    html << L"Version detected reliably: " << summary.versionDetectedCount << L"<br>";
+    html << L"Version guessed from file name: " << summary.versionHeuristicCount << L"<br>";
+    html << L"Version missing: " << summary.versionMissingCount << L"<br>";
+    html << L"Errors/warnings: " << summary.warningCount << L"<br>";
+    html << L"Scanned paths: " << HtmlEscape(JoinPathList(summary.scannedPaths)) << L"</div>\n";
 
     std::set<std::wstring> categories;
     for (const auto& record : records) {
@@ -123,27 +138,27 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
     }
 
     html << L"<div class=\"controls\">";
-    html << L"<label class=\"control\">Suche<input id=\"searchBox\" type=\"search\" placeholder=\"Alle sichtbaren Spalten durchsuchen\"></label>";
-    html << L"<label class=\"control\">Typ<select id=\"typeFilter\"><option value=\"\">Alle</option><option value=\"VST2\">VST2</option><option value=\"VST3\">VST3</option><option value=\"CLAP\">CLAP</option><option value=\"AAX\">AAX</option></select></label>";
-    html << L"<label class=\"control\">Kategorie<select id=\"categoryFilter\"><option value=\"\">Alle</option>";
+    html << L"<label class=\"control\">Search<input id=\"searchBox\" type=\"search\" placeholder=\"Search all visible columns\"></label>";
+    html << L"<label class=\"control\">Type<select id=\"typeFilter\"><option value=\"\">All</option><option value=\"VST2\">VST2</option><option value=\"VST3\">VST3</option><option value=\"CLAP\">CLAP</option><option value=\"AAX\">AAX</option></select></label>";
+    html << L"<label class=\"control\">Category<select id=\"categoryFilter\"><option value=\"\">All</option>";
     for (const auto& category : categories) {
         html << L"<option value=\"" << HtmlEscape(category) << L"\">" << HtmlEscape(category) << L"</option>";
     }
     html << L"</select></label>";
-    html << L"<label class=\"control\">Dubletten<select id=\"duplicateFilter\"><option value=\"\">Alle</option><option value=\"1\">Nur Dubletten</option><option value=\"0\">Keine Dubletten</option></select></label>";
+    html << L"<label class=\"control\">Duplicates<select id=\"duplicateFilter\"><option value=\"\">All</option><option value=\"1\">Duplicates only</option><option value=\"0\">No duplicates</option></select></label>";
     html << L"<span id=\"resultCount\" class=\"result-count\"></span></div>\n";
 
     html << L"<table id=\"pluginTable\"><thead><tr>";
-    WriteSortableHeader(html, L"Hersteller", 0, L"text");
-    WriteSortableHeader(html, L"Pluginname", 1, L"text");
-    WriteSortableHeader(html, L"Kategorie", 2, L"text");
+    WriteSortableHeader(html, L"Manufacturer", 0, L"text");
+    WriteSortableHeader(html, L"Plug-in name", 1, L"text");
+    WriteSortableHeader(html, L"Category", 2, L"text");
     WriteSortableHeader(html, L"Version", 3, L"text");
-    WriteSortableHeader(html, L"Versionsquelle", 4, L"text");
-    WriteSortableHeader(html, L"Typ", 5, L"text");
-    WriteSortableHeader(html, L"Pfad", 6, L"text");
-    WriteSortableHeader(html, L"Dateigroesse", 7, L"number");
-    WriteSortableHeader(html, L"Aenderungsdatum", 8, L"number");
-    WriteSortableHeader(html, L"Dublette", 9, L"number");
+    WriteSortableHeader(html, L"Version source", 4, L"text");
+    WriteSortableHeader(html, L"Type", 5, L"text");
+    WriteSortableHeader(html, L"Path", 6, L"text");
+    WriteSortableHeader(html, L"File size", 7, L"number");
+    WriteSortableHeader(html, L"Modified", 8, L"number");
+    WriteSortableHeader(html, L"Duplicate", 9, L"number");
     WriteSortableHeader(html, L"Status", 10, L"text");
     html << L"</tr></thead><tbody>\n";
 
@@ -187,7 +202,7 @@ bool ReportWriter::WriteHtml(const std::filesystem::path& outputPath,
     html << L"function value(row,column,type){var cell=row.cells[column];var raw=cell.getAttribute('data-sort')||cell.textContent;if(type==='number'){var n=Number(raw);return isNaN(n)?0:n;}return raw.toLowerCase();}\n";
     html << L"function compare(a,b,column,type){var av=value(a,column,type);var bv=value(b,column,type);if(type==='number'){return (av-bv)*sortDirection;}return av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'})*sortDirection;}\n";
     html << L"function updateIndicators(active){Array.prototype.forEach.call(table.tHead.querySelectorAll('.sort-indicator'),function(el){el.textContent='';});if(active){active.querySelector('.sort-indicator').innerHTML=sortDirection===1?'&uarr;':'&darr;';}}\n";
-    html << L"function applyFilters(){var query=search.value.trim().toLowerCase();var type=typeFilter.value;var category=categoryFilter.value;var duplicate=duplicateFilter.value;var visible=0;rows.forEach(function(row){var ok=(!query||text(row).indexOf(query)!==-1)&&(!type||row.getAttribute('data-type')===type)&&(!category||row.getAttribute('data-category')===category)&&(!duplicate||row.getAttribute('data-duplicate')===duplicate);row.style.display=ok?'':'none';if(ok){visible++;}});resultCount.textContent=visible+' von '+rows.length+' Eintraegen';}\n";
+    html << L"function applyFilters(){var query=search.value.trim().toLowerCase();var type=typeFilter.value;var category=categoryFilter.value;var duplicate=duplicateFilter.value;var visible=0;rows.forEach(function(row){var ok=(!query||text(row).indexOf(query)!==-1)&&(!type||row.getAttribute('data-type')===type)&&(!category||row.getAttribute('data-category')===category)&&(!duplicate||row.getAttribute('data-duplicate')===duplicate);row.style.display=ok?'':'none';if(ok){visible++;}});resultCount.textContent=visible+' of '+rows.length+' entries';}\n";
     html << L"Array.prototype.forEach.call(table.tHead.querySelectorAll('th[data-column]'),function(header){header.addEventListener('click',function(){var column=Number(header.getAttribute('data-column'));var type=header.getAttribute('data-sort-type');if(sortColumn===column){sortDirection*=-1;}else{sortColumn=column;sortDirection=1;}rows.sort(function(a,b){return compare(a,b,column,type);});rows.forEach(function(row){tbody.appendChild(row);});updateIndicators(header);applyFilters();});});\n";
     html << L"[search,typeFilter,categoryFilter,duplicateFilter].forEach(function(control){control.addEventListener('input',applyFilters);control.addEventListener('change',applyFilters);});\n";
     html << L"applyFilters();\n";
@@ -201,7 +216,7 @@ bool ReportWriter::WriteCsv(const std::filesystem::path& outputPath,
                             const ScanSummary&,
                             std::wstring& errorMessage) const {
     std::wstringstream csv;
-    csv << L"Hersteller;Pluginname;Kategorie;Version;Versionsquelle;Typ;Pfad;Dateiname;Dateigroesse;Aenderungsdatum;Dublette;Status;Warnung\n";
+    csv << L"Manufacturer;PluginName;Category;Version;VersionSource;Type;Path;FileName;FileSize;Modified;Duplicate;Status;Warning\n";
     for (const auto& record : records) {
         csv << CsvEscape(record.manufacturer) << L";"
             << CsvEscape(record.pluginName) << L";"
@@ -227,34 +242,34 @@ bool ReportWriter::WriteTxt(const std::filesystem::path& outputPath,
     std::wstringstream text;
     text << L"VST Plugin Scan Report\n";
     text << L"======================\n\n";
-    text << L"Scanzeitpunkt: " << summary.scanTimestamp << L"\n";
-    text << L"Anzahl VST2: " << summary.vst2Count << L"\n";
-    text << L"Anzahl VST3: " << summary.vst3Count << L"\n";
-    text << L"Anzahl CLAP: " << summary.clapCount << L"\n";
-    text << L"Anzahl AAX: " << summary.aaxCount << L"\n";
-    text << L"Dubletten-Gruppen: " << summary.duplicateCount << L"\n";
-    text << L"Dubletten-Eintraege: " << summary.duplicateEntryCount << L"\n";
-    text << L"VST2-Dubletten loeschbar: " << summary.vst2DuplicateCandidateCount << L"\n";
-    text << L"Version zuverlaessig ermittelt: " << summary.versionDetectedCount << L"\n";
-    text << L"Version heuristisch aus Dateiname: " << summary.versionHeuristicCount << L"\n";
-    text << L"Version fehlt: " << summary.versionMissingCount << L"\n";
-    text << L"Fehler/Warnungen: " << summary.warningCount << L"\n";
-    text << L"Gescannte Pfade: " << JoinPathList(summary.scannedPaths) << L"\n\n";
+    text << L"Scan time: " << summary.scanTimestamp << L"\n";
+    text << L"VST2 count: " << summary.vst2Count << L"\n";
+    text << L"VST3 count: " << summary.vst3Count << L"\n";
+    text << L"CLAP count: " << summary.clapCount << L"\n";
+    text << L"AAX count: " << summary.aaxCount << L"\n";
+    text << L"Duplicate groups: " << summary.duplicateCount << L"\n";
+    text << L"Duplicate entries: " << summary.duplicateEntryCount << L"\n";
+    text << L"Deletable VST2 duplicates: " << summary.vst2DuplicateCandidateCount << L"\n";
+    text << L"Version detected reliably: " << summary.versionDetectedCount << L"\n";
+    text << L"Version guessed from file name: " << summary.versionHeuristicCount << L"\n";
+    text << L"Version missing: " << summary.versionMissingCount << L"\n";
+    text << L"Errors/warnings: " << summary.warningCount << L"\n";
+    text << L"Scanned paths: " << JoinPathList(summary.scannedPaths) << L"\n\n";
 
     for (const auto& record : records) {
         text << L"- " << record.pluginName << L" [" << ToDisplayText(record.pluginType) << L"]\n";
-        text << L"  Hersteller: " << record.manufacturer << L"\n";
-        text << L"  Kategorie: " << record.category << L"\n";
+        text << L"  Manufacturer: " << record.manufacturer << L"\n";
+        text << L"  Category: " << record.category << L"\n";
         text << L"  Version: " << record.version << L"\n";
-        text << L"  Versionsquelle: " << ToDisplayText(record.versionSource) << L"\n";
-        text << L"  Pfad: " << record.filePath << L"\n";
-        text << L"  Dateiname: " << record.fileName << L"\n";
-        text << L"  Dateigroesse: " << FormatFileSize(record.fileSize) << L"\n";
-        text << L"  Aenderungsdatum: " << record.modifiedDate << L"\n";
-        text << L"  Dublette: " << DuplicateText(record) << L"\n";
+        text << L"  Version source: " << ToDisplayText(record.versionSource) << L"\n";
+        text << L"  Path: " << record.filePath << L"\n";
+        text << L"  File name: " << record.fileName << L"\n";
+        text << L"  File size: " << FormatFileSize(record.fileSize) << L"\n";
+        text << L"  Modified: " << record.modifiedDate << L"\n";
+        text << L"  Duplicate: " << DuplicateText(record) << L"\n";
         text << L"  Status: " << ToDisplayText(record) << L"\n";
         if (!record.warningMessage.empty()) {
-            text << L"  Warnung: " << record.warningMessage << L"\n";
+            text << L"  Warning: " << record.warningMessage << L"\n";
         }
         text << L"\n";
     }

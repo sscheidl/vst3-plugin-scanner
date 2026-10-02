@@ -229,6 +229,9 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
         return false;
     }
 
+    bool hasVstPluginMain = false;
+    bool hasLegacyMain = false;
+    bool hasComServerExports = false;
     for (DWORD i = 0; i < exportDirectory.NumberOfNames; ++i) {
         DWORD nameRva = 0;
         if (!ReadStruct(bytes, *namesOffset + static_cast<std::size_t>(i) * sizeof(DWORD), nameRva)) {
@@ -239,13 +242,25 @@ bool HasVst2EntrypointExport(const std::filesystem::path& path) {
             continue;
         }
         std::string exportName;
-        if (ReadNullTerminatedAscii(bytes, *nameOffset, exportName) &&
-            (exportName == "VSTPluginMain" || exportName == "main")) {
-            return true;
+        if (!ReadNullTerminatedAscii(bytes, *nameOffset, exportName)) {
+            continue;
+        }
+        if (exportName == "VSTPluginMain") {
+            hasVstPluginMain = true;
+        } else if (exportName == "main" || exportName == "main_plugin") {
+            hasLegacyMain = true;
+        } else if (exportName == "DllGetClassObject" || exportName == "DllRegisterServer" ||
+                   exportName == "DllUnregisterServer") {
+            hasComServerExports = true;
         }
     }
 
-    return false;
+    if (hasVstPluginMain) {
+        return true;
+    }
+    // Legacy VST 2.3 plug-ins export only "main". Ordinary COM servers sometimes do
+    // as well, so a module that registers COM classes is not accepted on "main" alone.
+    return hasLegacyMain && !hasComServerExports;
 }
 
 void AddUniquePath(std::vector<std::filesystem::path>& paths, const std::wstring& value) {
@@ -271,11 +286,11 @@ void CollectCandidatesFromPath(const std::filesystem::path& root,
                                const ScannerEngine::LogCallback& onLog) {
     std::error_code ec;
     if (!std::filesystem::exists(root, ec) || ec) {
-        onLog(L"Ungueltiger oder nicht erreichbarer Pfad: " + root.wstring());
+        onLog(L"Invalid or unreachable path: " + root.wstring());
         return;
     }
     if (!std::filesystem::is_directory(root, ec) || ec) {
-        onLog(L"Pfad ist kein Ordner: " + root.wstring());
+        onLog(L"Path is not a folder: " + root.wstring());
         return;
     }
 
@@ -289,17 +304,28 @@ void CollectCandidatesFromPath(const std::filesystem::path& root,
 
     while (!stopRequested.load() && iterator != end) {
         if (ec) {
-            onLog(L"Zugriff beim Scannen uebersprungen: " + Utf8ToWide(ec.message()));
+            onLog(L"Skipped during scan: " + Utf8ToWide(ec.message()));
             ec.clear();
         }
 
         const auto path = iterator->path();
         bool descend = true;
         try {
-            if (iterator->is_directory(ec) && !ec && HasExtension(path, L".vst3")) {
-                candidates.push_back({ path, PluginType::Vst3 });
-                descend = false;
-            } else if (iterator->is_regular_file(ec) && !ec) {
+            std::error_code typeError;
+            const bool isDirectory = iterator->is_directory(typeError) && !typeError;
+            typeError.clear();
+            const bool isRegularFile = !isDirectory &&
+                iterator->is_regular_file(typeError) && !typeError;
+
+            if (isDirectory) {
+                if (HasExtension(path, L".vst3")) {
+                    candidates.push_back({ path, PluginType::Vst3 });
+                    descend = false;
+                } else if (HasExtension(path, L".aaxplugin")) {
+                    candidates.push_back({ path, PluginType::Aax });
+                    descend = false;
+                }
+            } else if (isRegularFile) {
                 if (HasExtension(path, L".dll")) {
                     if (HasVst2EntrypointExport(path)) {
                         candidates.push_back({ path, PluginType::Vst2 });
@@ -309,12 +335,9 @@ void CollectCandidatesFromPath(const std::filesystem::path& root,
                 } else if (HasExtension(path, L".clap")) {
                     candidates.push_back({ path, PluginType::Clap });
                 }
-            } else if (iterator->is_directory(ec) && !ec && HasExtension(path, L".aaxplugin")) {
-                candidates.push_back({ path, PluginType::Aax });
-                descend = false;
             }
         } catch (const std::filesystem::filesystem_error& ex) {
-            onLog(L"Fehler beim Zugriff: " + path.wstring() + L" (" + Utf8ToWide(ex.what()) + L")");
+            onLog(L"Access error: " + path.wstring() + L" (" + Utf8ToWide(ex.what()) + L")");
         }
 
         if (!descend) {
@@ -392,14 +415,14 @@ ScanResult ScannerEngine::Scan(const ScanOptions& options,
     AddUniquePath(roots, options.aaxPath);
     AddUniquePath(roots, options.customPath);
 
-    onProgress({ 0, 0, L"Sammle Plugin-Dateien..." });
+    onProgress({ 0, 0, L"Collecting plug-in files..." });
 
     std::vector<Candidate> candidates;
     for (const auto& root : roots) {
         if (stopRequested.load()) {
             break;
         }
-        onLog(L"Scanne Pfad: " + root.wstring());
+        onLog(L"Scanning path: " + root.wstring());
         CollectCandidatesFromPath(root, candidates, result.summary.scannedPaths, stopRequested, onLog);
     }
 
@@ -416,12 +439,12 @@ ScanResult ScannerEngine::Scan(const ScanOptions& options,
 
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         if (stopRequested.load()) {
-            onLog(L"Scan wurde abgebrochen.");
+            onLog(L"Scan was cancelled.");
             break;
         }
 
         const auto& candidate = candidates[index];
-        onProgress({ index + 1, total, L"Lese Metadaten: " + candidate.path.filename().wstring() });
+        onProgress({ index + 1, total, L"Reading metadata: " + candidate.path.filename().wstring() });
 
         try {
             PluginRecord record = reader.ReadPlugin(candidate.path, candidate.type);
@@ -433,24 +456,29 @@ ScanResult ScannerEngine::Scan(const ScanOptions& options,
             failed.fileName = candidate.path.filename().wstring();
             failed.pluginName = candidate.path.stem().wstring();
             failed.status = ScanStatus::AccessError;
-            failed.warningMessage = Utf8ToWide(ex.what());
+            SetWarning(failed, WarningCode::ScanError, Utf8ToWide(ex.what()));
+            // No manual warning counting here: BuildSummary derives every counter
+            // from the finished record list further down.
             result.records.push_back(std::move(failed));
-            ++result.summary.warningCount;
         }
     }
 
     DuplicateDetector detector;
     detector.MarkDuplicates(result.records);
 
-    const PluginUserPrefsResult userPrefs = ApplyPluginUserPrefs(PluginUserPrefsPathNextToExe(), result.records);
+    const std::filesystem::path rulesPath = options.rulesPath.empty()
+        ? PluginUserPrefsPathNextToExe()
+        : std::filesystem::path(options.rulesPath);
+    const PluginUserPrefsResult userPrefs = ApplyPluginUserPrefs(rulesPath, result.records);
     if (!userPrefs.warningMessage.empty()) {
         onLog(userPrefs.warningMessage);
     } else if (userPrefs.rulesLoaded) {
-        onLog(L"plugin_rules_userprefs.json angewendet: " + std::to_wstring(userPrefs.appliedCount) + L" Eintraege aktualisiert.");
+        onLog(L"Applied " + rulesPath.wstring() + L": " +
+              std::to_wstring(userPrefs.appliedCount) + L" entries updated.");
     }
 
     result.summary = BuildSummary(result.records, result.summary.scannedPaths, result.summary.scanTimestamp);
 
-    onProgress({ result.records.size(), total, stopRequested.load() ? L"Scan abgebrochen." : L"Scan abgeschlossen." });
+    onProgress({ result.records.size(), total, stopRequested.load() ? L"Scan cancelled." : L"Scan complete." });
     return result;
 }

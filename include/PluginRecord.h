@@ -31,6 +31,19 @@ enum class VersionSource {
     ManualEdit
 };
 
+// Warnings are identified by code, never by their display text. Logic in other
+// translation units must compare codes so that wording stays a pure UI concern.
+enum class WarningCode {
+    None,
+    PathNotReadable,
+    FileSizeNotReadable,
+    ModifiedDateNotReadable,
+    HeuristicVersionFromFileName,
+    IncompleteMetadata,
+    NoWindowsVersionInfo,
+    ScanError
+};
+
 struct PluginRecord {
     std::wstring manufacturer;
     std::wstring pluginName;
@@ -45,6 +58,7 @@ struct PluginRecord {
     int duplicateGroupId = 0;
     bool isPossibleDuplicate = false;
     ScanStatus status = ScanStatus::Unknown;
+    WarningCode warningCode = WarningCode::None;
     std::wstring warningMessage;
     bool metadataFromModuleInfo = false;
     bool metadataFromJson = false;
@@ -89,14 +103,14 @@ struct ScanSummary {
 [[nodiscard]] inline const wchar_t* ToDisplayText(ScanStatus status) {
     switch (status) {
     case ScanStatus::Recognized:
-        return L"erfolgreich erkannt";
+        return L"recognized";
     case ScanStatus::PartiallyRecognized:
-        return L"Metadaten teilweise erkannt";
+        return L"metadata partially recognized";
     case ScanStatus::AccessError:
-        return L"Fehler beim Zugriff";
+        return L"access error";
     case ScanStatus::Unknown:
     default:
-        return L"unbekannt";
+        return L"unknown";
     }
 }
 
@@ -105,7 +119,7 @@ struct ScanSummary {
     case VersionSource::Vst3ModuleInfo:
         return L"VST3 moduleinfo.json";
     case VersionSource::Vst3SdkProbe:
-        return L"VST3 SDK-Probe";
+        return L"VST3 SDK probe";
     case VersionSource::WindowsProductVersion:
         return L"Windows ProductVersion";
     case VersionSource::WindowsFileVersion:
@@ -113,15 +127,53 @@ struct ScanSummary {
     case VersionSource::WindowsFixedFileInfo:
         return L"Windows FixedFileInfo";
     case VersionSource::FileName:
-        return L"Dateiname (Heuristik)";
+        return L"file name (heuristic)";
     case VersionSource::UserRule:
-        return L"Benutzerregel";
+        return L"user rule";
     case VersionSource::ManualEdit:
-        return L"Manuelle Eingabe";
+        return L"manual edit";
     case VersionSource::Unknown:
     default:
-        return L"Unbekannt";
+        return L"unknown";
     }
+}
+
+[[nodiscard]] inline const wchar_t* ToDisplayText(WarningCode code) {
+    switch (code) {
+    case WarningCode::PathNotReadable:
+        return L"Path could not be read";
+    case WarningCode::FileSizeNotReadable:
+        return L"File size could not be read";
+    case WarningCode::ModifiedDateNotReadable:
+        return L"Modified date could not be read";
+    case WarningCode::HeuristicVersionFromFileName:
+        return L"Version number was only guessed from the file name";
+    case WarningCode::IncompleteMetadata:
+        return L"Not all metadata could be determined reliably";
+    case WarningCode::NoWindowsVersionInfo:
+        return L"No Windows version information found";
+    case WarningCode::ScanError:
+        return L"Scan error";
+    case WarningCode::None:
+    default:
+        return L"";
+    }
+}
+
+inline void SetWarning(PluginRecord& record, WarningCode code, const std::wstring& detail = {}) {
+    record.warningCode = code;
+    if (code == WarningCode::None) {
+        record.warningMessage.clear();
+        return;
+    }
+    record.warningMessage = ToDisplayText(code);
+    if (!detail.empty()) {
+        record.warningMessage += L": " + detail;
+    }
+}
+
+inline void ClearWarning(PluginRecord& record) {
+    SetWarning(record, WarningCode::None);
 }
 
 [[nodiscard]] inline std::wstring ToDisplayText(const PluginRecord& record) {
@@ -130,13 +182,13 @@ struct ScanSummary {
         text += L" | VST3 moduleinfo.json";
     }
     if (record.metadataFromJson) {
-        text += L" | Daten aus JSON";
+        text += L" | data from JSON";
     }
     if (record.metadataFromManualOverrides) {
-        text += L" | Daten aus manualOverrides";
+        text += L" | data from manualOverrides";
     }
     if (record.manuallyEdited) {
-        text += L" | Manuell editiert";
+        text += L" | manually edited";
     }
     return text;
 }

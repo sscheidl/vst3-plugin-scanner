@@ -75,7 +75,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     if (argc > 1) {
         const PluginRecord executableRecord = reader.ReadPlugin(argv[1], PluginType::Vst2);
-        Expect(executableRecord.version == L"1.1.0.0", "Windows version resource");
+        Expect(executableRecord.version == L"1.2.0.0", "Windows version resource");
         Expect(executableRecord.versionSource == VersionSource::WindowsProductVersion,
                "Windows version source");
     } else {

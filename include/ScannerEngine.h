@@ -13,6 +13,10 @@ struct ScanOptions {
     std::wstring clapPath;
     std::wstring aaxPath;
     std::wstring customPath;
+    // Rules file the scan must apply. The GUI resolves this once so that editing,
+    // saving and applying always operate on the very same file. Empty falls back
+    // to the file next to the executable.
+    std::wstring rulesPath;
 };
 
 struct ScanResult {

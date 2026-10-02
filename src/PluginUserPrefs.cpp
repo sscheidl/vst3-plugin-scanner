@@ -40,12 +40,12 @@ public:
         index_ = 0;
         SkipWhitespace();
         if (!ParseValue(value)) {
-            error = L"JSON konnte nicht gelesen werden.";
+            error = L"JSON could not be parsed.";
             return false;
         }
         SkipWhitespace();
         if (index_ != text_.size()) {
-            error = L"JSON enthaelt unerwartete Daten.";
+            error = L"JSON contains unexpected trailing data.";
             return false;
         }
         return true;
@@ -368,31 +368,53 @@ std::wstring StemWithoutPluginExtension(const std::wstring& fileName) {
     return std::filesystem::path(fileName).stem().wstring();
 }
 
-std::vector<std::wstring> MatchHaystacks(const PluginRecord& record) {
-    std::vector<std::wstring> values = {
-        record.pluginName,
-        record.fileName,
-        StemWithoutPluginExtension(record.fileName),
-        record.filePath,
-    };
+// Name-like values allow substring matching, because short tokens such as "bx"
+// legitimately identify a plug-in by file name. Folder names are kept separate:
+// matching a short token as a substring of a whole installation path produced
+// false positives (for example "sol" inside "Solid State Logic").
+struct RecordHaystacks {
+    std::vector<std::wstring> names;
+    std::vector<std::wstring> pathParts;
+};
 
-    std::vector<std::wstring> normalized;
-    for (const auto& value : values) {
-        const std::wstring key = NormalizeMatchToken(value);
-        if (!key.empty() && std::find(normalized.begin(), normalized.end(), key) == normalized.end()) {
-            normalized.push_back(key);
-        }
+constexpr std::size_t kMinPathSubstringTokenLength = 5;
+
+void AddNormalizedUnique(std::vector<std::wstring>& target, const std::wstring& value) {
+    const std::wstring key = NormalizeMatchToken(value);
+    if (!key.empty() && std::find(target.begin(), target.end(), key) == target.end()) {
+        target.push_back(key);
     }
-    return normalized;
 }
 
-bool TokenMatchesRecord(const std::wstring& token, const std::vector<std::wstring>& haystacks) {
+RecordHaystacks BuildHaystacks(const PluginRecord& record) {
+    RecordHaystacks haystacks;
+    AddNormalizedUnique(haystacks.names, record.pluginName);
+    AddNormalizedUnique(haystacks.names, record.fileName);
+    AddNormalizedUnique(haystacks.names, StemWithoutPluginExtension(record.fileName));
+
+    const std::filesystem::path parent = std::filesystem::path(record.filePath).parent_path();
+    for (const auto& part : parent) {
+        AddNormalizedUnique(haystacks.pathParts, part.wstring());
+    }
+    return haystacks;
+}
+
+bool TokenMatchesRecord(const std::wstring& token, const RecordHaystacks& haystacks) {
     const std::wstring normalizedToken = NormalizeMatchToken(token);
     if (normalizedToken.empty()) {
         return false;
     }
-    for (const auto& haystack : haystacks) {
-        if (haystack == normalizedToken || haystack.find(normalizedToken) != std::wstring::npos) {
+    for (const auto& name : haystacks.names) {
+        if (name.find(normalizedToken) != std::wstring::npos) {
+            return true;
+        }
+    }
+    for (const auto& part : haystacks.pathParts) {
+        if (part == normalizedToken) {
+            return true;
+        }
+        if (normalizedToken.size() >= kMinPathSubstringTokenLength &&
+            part.find(normalizedToken) != std::wstring::npos) {
             return true;
         }
     }
@@ -413,7 +435,7 @@ bool TypeMatchesRecord(const PluginRule& rule, PluginType type) {
 }
 
 const PluginRule* FindBestPluginRule(const UserPrefs& prefs, const PluginRecord& record) {
-    const std::vector<std::wstring> haystacks = MatchHaystacks(record);
+    const RecordHaystacks haystacks = BuildHaystacks(record);
     const PluginRule* best = nullptr;
     std::size_t bestTokenLength = 0;
 
@@ -436,7 +458,7 @@ const PluginRule* FindBestPluginRule(const UserPrefs& prefs, const PluginRecord&
 }
 
 const VendorRule* FindBestVendorRule(const UserPrefs& prefs, const PluginRecord& record) {
-    const std::vector<std::wstring> haystacks = MatchHaystacks(record);
+    const RecordHaystacks haystacks = BuildHaystacks(record);
     const VendorRule* best = nullptr;
     std::size_t bestTokenLength = 0;
 
@@ -546,7 +568,7 @@ bool LoadUserPrefs(const std::filesystem::path& rulesPath, UserPrefs& prefs, std
     bool readOk = false;
     const std::wstring text = ReadUtf8File(rulesPath, readOk);
     if (!readOk) {
-        warningMessage = L"plugin_rules_userprefs.json konnte nicht gelesen werden.";
+        warningMessage = L"plugin_rules_userprefs.json could not be read.";
         return false;
     }
 
@@ -554,7 +576,7 @@ bool LoadUserPrefs(const std::filesystem::path& rulesPath, UserPrefs& prefs, std
     JsonParser parser(text);
     std::wstring parseError;
     if (!parser.Parse(root, parseError) || root.type != JsonValue::Type::Object) {
-        warningMessage = L"Warnung: plugin_rules_userprefs.json ist defekt. " + parseError;
+        warningMessage = L"Warning: plugin_rules_userprefs.json is malformed. " + parseError;
         return false;
     }
 
@@ -567,7 +589,7 @@ bool LoadUserPrefs(const std::filesystem::path& rulesPath, UserPrefs& prefs, std
         prefs.vendorRules.empty() &&
         prefs.vendorAliases.empty() &&
         prefs.manualOverrides.empty()) {
-        warningMessage = L"Warnung: plugin_rules_userprefs.json enthaelt keine verwertbaren Regeln.";
+        warningMessage = L"Warning: plugin_rules_userprefs.json contains no usable rules.";
         return false;
     }
     return true;
@@ -636,15 +658,19 @@ void RecomputeMetadataStatus(PluginRecord& record) {
 
     if (hasName && hasManufacturer && hasReliableVersion) {
         record.status = ScanStatus::Recognized;
-        if (record.warningMessage == L"Nicht alle Metadaten konnten zuverlaessig ermittelt werden." ||
-            record.warningMessage == L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt." ||
-            record.warningMessage == L"Keine Windows-Versioninformationen gefunden.") {
-            record.warningMessage.clear();
+        // Only warnings that describe missing metadata are retracted here. Access
+        // errors and unreadable timestamps stay, and the comparison is on the code
+        // so that display wording can change freely.
+        if (record.warningCode == WarningCode::IncompleteMetadata ||
+            record.warningCode == WarningCode::HeuristicVersionFromFileName ||
+            record.warningCode == WarningCode::NoWindowsVersionInfo) {
+            ClearWarning(record);
         }
     } else if (hasName || hasManufacturer || hasVersion) {
         record.status = ScanStatus::PartiallyRecognized;
-        if (record.versionSource == VersionSource::FileName && record.warningMessage.empty()) {
-            record.warningMessage = L"Versionsnummer wurde nur heuristisch aus dem Dateinamen ermittelt.";
+        if (record.versionSource == VersionSource::FileName &&
+            record.warningCode == WarningCode::None) {
+            SetWarning(record, WarningCode::HeuristicVersionFromFileName);
         }
     } else {
         record.status = ScanStatus::Unknown;
@@ -921,7 +947,7 @@ bool JsonPluginRuleTypeMatchesRecord(const JsonValue& rule, PluginType type) {
 }
 
 int FindPluginRuleIndexForRecord(const std::vector<JsonValue>& rules, const PluginRecord& record) {
-    const std::vector<std::wstring> haystacks = MatchHaystacks(record);
+    const RecordHaystacks haystacks = BuildHaystacks(record);
     int bestIndex = -1;
     std::size_t bestTokenLength = 0;
 
@@ -1004,15 +1030,24 @@ JsonValue NewPluginRuleFromRecord(const PluginRecord& record) {
 }
 
 bool WriteUtf8File(const std::filesystem::path& path, const std::wstring& content, std::wstring& errorMessage) {
-    std::ofstream stream(path, std::ios::binary);
-    if (!stream) {
-        errorMessage = L"Datei konnte nicht geschrieben werden: " + path.wstring();
+    // Convert first: an empty result for non-empty input means the text could not
+    // be encoded, and writing it would truncate the rules file to zero bytes.
+    const std::string bytes = WideToUtf8(content);
+    if (bytes.empty() && !content.empty()) {
+        errorMessage = L"Rules file contains characters that cannot be encoded as UTF-8: " + path.wstring();
         return false;
     }
-    const std::string bytes = WideToUtf8(content);
+
+    std::ofstream stream(path, std::ios::binary);
+    if (!stream) {
+        errorMessage = L"File could not be written: " + path.wstring();
+        return false;
+    }
     stream.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    stream.flush();
+    stream.close();
     if (!stream.good()) {
-        errorMessage = L"Datei konnte nicht vollstaendig geschrieben werden: " + path.wstring();
+        errorMessage = L"File could not be written completely: " + path.wstring();
         return false;
     }
     return true;
@@ -1289,7 +1324,7 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
     if (fileExists) {
         text = ReadUtf8File(rulesPath, readOk);
         if (!readOk) {
-            result.errorMessage = L"plugin_rules_userprefs.json konnte nicht gelesen werden.";
+            result.errorMessage = L"plugin_rules_userprefs.json could not be read.";
             return result;
         }
     } else {
@@ -1304,7 +1339,7 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
     JsonParser parser(text);
     std::wstring parseError;
     if (!parser.Parse(root, parseError) || root.type != JsonValue::Type::Object) {
-        result.errorMessage = L"plugin_rules_userprefs.json ist defekt. pluginRules wurden nicht gespeichert. " + parseError;
+        result.errorMessage = L"plugin_rules_userprefs.json is malformed. pluginRules were not saved. " + parseError;
         return result;
     }
 
@@ -1336,7 +1371,7 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
     } else {
         std::size_t insertAt = text.find_last_of(L'}');
         if (insertAt == std::wstring::npos) {
-            result.errorMessage = L"plugin_rules_userprefs.json konnte nicht aktualisiert werden.";
+            result.errorMessage = L"plugin_rules_userprefs.json could not be updated.";
             return result;
         }
 
@@ -1361,7 +1396,7 @@ SaveManualOverridesResult SaveManualOverrides(const std::filesystem::path& rules
         result.backupPath = rulesPath.parent_path() /
             (rulesPath.stem().wstring() + L".backup_" + BackupTimestamp() + rulesPath.extension().wstring());
         if (!std::filesystem::copy_file(rulesPath, result.backupPath, std::filesystem::copy_options::overwrite_existing, ec) || ec) {
-            result.errorMessage = L"Backup konnte nicht erstellt werden: " + result.backupPath.wstring();
+            result.errorMessage = L"Backup could not be created: " + result.backupPath.wstring();
             return result;
         }
     }

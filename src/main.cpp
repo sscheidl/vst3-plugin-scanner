@@ -9,6 +9,7 @@
 #include <windowsx.h>
 #include <CommCtrl.h>
 #include <ShlObj.h>
+#include <shobjidl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 
@@ -62,11 +63,15 @@ constexpr int IDC_INLINE_EDIT = 1027;
 constexpr UINT IDM_OPEN_IN_EXPLORER = 40001;
 constexpr UINT IDM_DELETE_SELECTED = 40002;
 
-constexpr wchar_t APP_VERSION[] = L"1.1.0.0";
+constexpr wchar_t APP_VERSION[] = L"1.2.0.0";
 
 constexpr UINT WM_SCAN_PROGRESS = WM_APP + 1;
 constexpr UINT WM_SCAN_LOG = WM_APP + 2;
 constexpr UINT WM_SCAN_DONE = WM_APP + 3;
+// Destroying the inline editor from inside its own WM_KILLFOCUS handler is
+// fragile, so the window is only hidden there and destroyed from the message
+// loop through this message.
+constexpr UINT WM_DESTROY_INLINE_EDIT = WM_APP + 4;
 
 struct ProgressMessage {
     std::size_t current = 0;
@@ -114,7 +119,22 @@ struct AppState {
     HWND inlineEdit = nullptr;
     int editRow = -1;
     int editColumn = -1;
+    HFONT uiFont = nullptr;
 };
+
+HFONT CreateUiFont() {
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+        return nullptr;
+    }
+    return CreateFontIndirectW(&metrics.lfMessageFont);
+}
+
+BOOL CALLBACK ApplyFontToChild(HWND child, LPARAM font) {
+    SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(font), TRUE);
+    return TRUE;
+}
 
 std::wstring GetWindowTextString(HWND control) {
     const int length = GetWindowTextLengthW(control);
@@ -146,12 +166,12 @@ std::wstring SummaryText(const ScanSummary& summary) {
         L" | VST3: " + std::to_wstring(summary.vst3Count) +
         L" | CLAP: " + std::to_wstring(summary.clapCount) +
         L" | AAX: " + std::to_wstring(summary.aaxCount) +
-        L" | Dubletten-Gruppen: " + std::to_wstring(summary.duplicateCount) +
-        L" | Eintraege: " + std::to_wstring(summary.duplicateEntryCount) +
-        L" | VST2 loeschbar: " + std::to_wstring(summary.vst2DuplicateCandidateCount) +
-        L" | Version sicher: " + std::to_wstring(summary.versionDetectedCount) +
-        L" | heuristisch: " + std::to_wstring(summary.versionHeuristicCount) +
-        L" | fehlt: " + std::to_wstring(summary.versionMissingCount);
+        L" | duplicate groups: " + std::to_wstring(summary.duplicateCount) +
+        L" | entries: " + std::to_wstring(summary.duplicateEntryCount) +
+        L" | VST2 deletable: " + std::to_wstring(summary.vst2DuplicateCandidateCount) +
+        L" | version reliable: " + std::to_wstring(summary.versionDetectedCount) +
+        L" | heuristic: " + std::to_wstring(summary.versionHeuristicCount) +
+        L" | missing: " + std::to_wstring(summary.versionMissingCount);
 }
 
 void UpdateSummaryLabel(AppState& state) {
@@ -204,7 +224,7 @@ void PopulateResultsList(HWND list, const std::vector<PluginRecord>& records) {
         SetListText(list, i, 4, record.version);
         SetListText(list, i, 5, ToDisplayText(record.versionSource));
         SetListText(list, i, 6, FileSizeText(record.fileSize));
-        SetListText(list, i, 7, record.isPossibleDuplicate ? L"Ja" : L"Nein");
+        SetListText(list, i, 7, record.isPossibleDuplicate ? L"Yes" : L"No");
         SetListText(list, i, 8, ToDisplayText(record));
         SetListText(list, i, 9, record.filePath);
     }
@@ -227,7 +247,7 @@ std::wstring SortText(const PluginRecord& record, int column) {
     case 6:
         return std::to_wstring(record.fileSize);
     case 7:
-        return record.isPossibleDuplicate ? L"Ja" : L"Nein";
+        return record.isPossibleDuplicate ? L"Yes" : L"No";
     case 8:
         return ToDisplayText(record);
     case 9:
@@ -293,6 +313,9 @@ LRESULT CALLBACK InlineEditProc(HWND edit, UINT message, WPARAM wParam, LPARAM l
             FinishInlineEdit(*state, true);
             return 0;
         }
+        break;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(edit, InlineEditProc, 1);
         break;
     default:
         break;
@@ -364,12 +387,17 @@ void FinishInlineEdit(AppState& state, bool commit) {
             SetListText(state.results, row, 5, ToDisplayText(record.versionSource));
             SetListText(state.results, row, 8, ToDisplayText(record));
             EnableWindow(state.saveOverridesButton, TRUE);
-            SetWindowTextW(state.status, L"Manuelle Aenderung uebernommen.");
+            SetWindowTextW(state.status, L"Manual change applied.");
         }
     }
 
+    // The editor may currently be inside its own window procedure (WM_KILLFOCUS),
+    // so it is detached and hidden here and destroyed later from the message loop.
     RemoveWindowSubclass(edit, InlineEditProc, 1);
-    DestroyWindow(edit);
+    ShowWindow(edit, SW_HIDE);
+    if (!PostMessageW(state.window, WM_DESTROY_INLINE_EDIT, 0, reinterpret_cast<LPARAM>(edit))) {
+        DestroyWindow(edit);
+    }
 }
 
 void StartInlineEdit(AppState& state, int row, int column) {
@@ -407,6 +435,9 @@ void StartInlineEdit(AppState& state, int row, int column) {
 
     state.editRow = row;
     state.editColumn = column;
+    if (state.uiFont) {
+        SendMessageW(state.inlineEdit, WM_SETFONT, reinterpret_cast<WPARAM>(state.uiFont), TRUE);
+    }
     SetWindowSubclass(state.inlineEdit, InlineEditProc, 1, reinterpret_cast<DWORD_PTR>(&state));
     SendMessageW(state.inlineEdit, EM_SETSEL, 0, -1);
     SetFocus(state.inlineEdit);
@@ -432,7 +463,7 @@ std::wstring BrowseForFolder(HWND owner) {
     BROWSEINFOW info{};
     info.hwndOwner = owner;
     info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    info.lpszTitle = L"Ordner auswaehlen";
+    info.lpszTitle = L"Select folder";
 
     PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info);
     if (!item) {
@@ -685,6 +716,8 @@ void LayoutControls(HWND window, AppState& state) {
     MoveWindow(state.log, margin, logY, width - margin * 2, logHeight, TRUE);
 }
 
+std::filesystem::path JsonRulesSavePath();
+
 void StartScan(AppState& state) {
     if (state.running) {
         return;
@@ -693,12 +726,17 @@ void StartScan(AppState& state) {
         state.worker.join();
     }
 
+    // The scan must apply exactly the file that "Edit JSON" and "Save overrides"
+    // operate on, otherwise a run started from a different working directory reads
+    // a different rules file than the GUI writes.
+    const std::filesystem::path rulesPath = JsonRulesSavePath();
     const ScanOptions options{
         GetWindowTextString(GetDlgItem(state.window, IDC_VST2_PATH)),
         GetWindowTextString(GetDlgItem(state.window, IDC_VST3_PATH)),
         GetWindowTextString(GetDlgItem(state.window, IDC_CLAP_PATH)),
         GetWindowTextString(GetDlgItem(state.window, IDC_AAX_PATH)),
         GetWindowTextString(GetDlgItem(state.window, IDC_CUSTOM_PATH)),
+        rulesPath.wstring(),
     };
 
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
@@ -710,7 +748,7 @@ void StartScan(AppState& state) {
     UpdateSummaryLabel(state);
     EnableWindow(state.exportButton, FALSE);
     EnableWindow(state.saveOverridesButton, FALSE);
-    SetWindowTextW(state.status, L"Scan startet...");
+    SetWindowTextW(state.status, L"Starting scan...");
     SetWindowTextW(state.log, L"");
     state.stopRequested.store(false);
     SetRunningState(state, true);
@@ -736,19 +774,19 @@ void StartScan(AppState& state) {
                 done->summary = std::move(result.summary);
                 done->records = std::move(result.records);
             } catch (const std::exception& ex) {
-                done->fatalError = L"Unerwarteter Scanfehler: " + Utf8ToWide(ex.what());
+                done->fatalError = L"Unexpected scan error: " + Utf8ToWide(ex.what());
             } catch (...) {
-                done->fatalError = L"Unerwarteter unbekannter Scanfehler.";
+                done->fatalError = L"Unexpected unknown scan error.";
             }
             done->stopped = stopFlag->load();
             PostOwnedMessage(window, WM_SCAN_DONE, std::move(done));
         });
     } catch (const std::system_error& ex) {
         SetRunningState(state, false);
-        const std::wstring error = L"Scan-Thread konnte nicht gestartet werden: " + Utf8ToWide(ex.what());
-        SetWindowTextW(state.status, L"Scan konnte nicht gestartet werden.");
+        const std::wstring error = L"Scan thread could not be started: " + Utf8ToWide(ex.what());
+        SetWindowTextW(state.status, L"Scan could not be started.");
         AppendLog(state.log, error);
-        MessageBoxW(state.window, error.c_str(), L"Scanfehler", MB_OK | MB_ICONERROR);
+        MessageBoxW(state.window, error.c_str(), L"Scan error", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -767,12 +805,12 @@ void ExportResults(AppState& state) {
     ReportWriter writer;
     std::wstring error;
     if (writer.Write(outputPath, format, state.records, state.summary, error)) {
-        SetWindowTextW(state.status, L"Export abgeschlossen.");
+        SetWindowTextW(state.status, L"Export complete.");
         AppendLog(state.log, L"Export: " + outputPath);
     } else {
-        SetWindowTextW(state.status, L"Export fehlgeschlagen.");
-        AppendLog(state.log, L"Fehler: " + error);
-        MessageBoxW(state.window, error.c_str(), L"Export fehlgeschlagen", MB_OK | MB_ICONERROR);
+        SetWindowTextW(state.status, L"Export failed.");
+        AppendLog(state.log, L"Error: " + error);
+        MessageBoxW(state.window, error.c_str(), L"Export failed", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -783,8 +821,8 @@ void EditJsonRules(AppState& state) {
     if (jsonPath.empty()) {
         const int answer = MessageBoxW(
             state.window,
-            L"plugin_rules_userprefs.json wurde nicht gefunden. Neue Vorlage erstellen?",
-            L"JSON bearbeiten",
+            L"plugin_rules_userprefs.json was not found. Create a new template?",
+            L"Edit JSON",
             MB_YESNO | MB_ICONQUESTION);
         if (answer != IDYES) {
             return;
@@ -792,8 +830,8 @@ void EditJsonRules(AppState& state) {
 
         jsonPath = CreateJsonTemplateFile();
         if (jsonPath.empty()) {
-            SetWindowTextW(state.status, L"JSON-Vorlage konnte nicht erstellt werden.");
-            AppendLog(state.log, L"editor launch failed: plugin_rules_userprefs.json konnte nicht erstellt werden");
+            SetWindowTextW(state.status, L"JSON template could not be created.");
+            AppendLog(state.log, L"editor launch failed: plugin_rules_userprefs.json could not be created");
             return;
         }
         created = true;
@@ -804,12 +842,12 @@ void EditJsonRules(AppState& state) {
     if (LaunchEditor(editor, jsonPath, state.window) ||
         (ToLower(editor.filename().wstring()) != L"notepad.exe" &&
          LaunchEditor(L"notepad.exe", jsonPath, state.window))) {
-        SetWindowTextW(state.status, created ? L"JSON-Vorlage erstellt und geoeffnet." : L"JSON-Datei geoeffnet.");
+        SetWindowTextW(state.status, created ? L"JSON template created and opened." : L"JSON file opened.");
         AppendLog(state.log, L"plugin_rules_userprefs.json opened: " + jsonPath.wstring());
         return;
     }
 
-    SetWindowTextW(state.status, L"Editor konnte nicht gestartet werden.");
+    SetWindowTextW(state.status, L"Editor could not be started.");
     AppendLog(state.log, L"editor launch failed: " + jsonPath.wstring());
 }
 
@@ -829,44 +867,69 @@ std::filesystem::path JsonRulesSavePath() {
 void SaveOverrides(AppState& state) {
     FinishInlineEdit(state, true);
     if (!HasManualEdits(state)) {
-        SetWindowTextW(state.status, L"Keine manuellen Overrides zu speichern.");
-        AppendLog(state.log, L"Keine manuellen Overrides zu speichern.");
+        SetWindowTextW(state.status, L"No manual overrides to save.");
+        AppendLog(state.log, L"No manual overrides to save.");
         return;
     }
 
     const std::filesystem::path jsonPath = JsonRulesSavePath();
     const SaveManualOverridesResult result = SaveManualOverrides(jsonPath, state.records);
     if (!result.success) {
-        SetWindowTextW(state.status, L"Overrides konnten nicht gespeichert werden.");
-        AppendLog(state.log, L"Overrides speichern fehlgeschlagen: " + result.errorMessage);
-        MessageBoxW(state.window, result.errorMessage.c_str(), L"Overrides speichern", MB_OK | MB_ICONERROR);
+        SetWindowTextW(state.status, L"Overrides could not be saved.");
+        AppendLog(state.log, L"Saving overrides failed: " + result.errorMessage);
+        MessageBoxW(state.window, result.errorMessage.c_str(), L"Save overrides", MB_OK | MB_ICONERROR);
         return;
     }
 
-    SetWindowTextW(state.status, L"Overrides gespeichert.");
-    AppendLog(state.log, L"Overrides gespeichert: " + jsonPath.wstring());
+    SetWindowTextW(state.status, L"Overrides saved.");
+    AppendLog(state.log, L"Overrides saved: " + jsonPath.wstring());
     if (!result.backupPath.empty()) {
         AppendLog(state.log, L"Backup: " + result.backupPath.wstring());
     }
 }
 
+// SHFileOperation with FOF_ALLOWUNDO silently falls back to a permanent delete
+// when an item cannot be recycled (UNC paths, disabled Recycle Bin, items larger
+// than the bin quota). IFileOperation with FOFX_RECYCLEONDELETE fails instead of
+// destroying the file, which is what the documented behaviour promises.
 bool MovePathToRecycleBin(HWND owner, const std::wstring& path, std::wstring& error) {
-    std::wstring doubleNullPath = path;
-    doubleNullPath.push_back(L'\0');
-    doubleNullPath.push_back(L'\0');
-
-    SHFILEOPSTRUCTW operation{};
-    operation.hwnd = owner;
-    operation.wFunc = FO_DELETE;
-    operation.pFrom = doubleNullPath.c_str();
-    operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
-
-    const int result = SHFileOperationW(&operation);
-    if (result != 0 || operation.fAnyOperationsAborted) {
-        error = L"Pfad konnte nicht in den Papierkorb verschoben werden: " + path;
+    IFileOperation* operation = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&operation));
+    if (FAILED(hr) || !operation) {
+        error = L"Delete operation could not be created: " + path;
         return false;
     }
-    return true;
+
+    IShellItem* item = nullptr;
+    hr = operation->SetOperationFlags(static_cast<DWORD>(
+        FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT |
+        FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD));
+    if (SUCCEEDED(hr)) {
+        hr = operation->SetOwnerWindow(owner);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
+    }
+    if (SUCCEEDED(hr)) {
+        hr = operation->DeleteItem(item, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = operation->PerformOperations();
+    }
+
+    BOOL aborted = FALSE;
+    bool succeeded = SUCCEEDED(hr) &&
+        SUCCEEDED(operation->GetAnyOperationsAborted(&aborted)) && !aborted;
+
+    if (item) {
+        item->Release();
+    }
+    operation->Release();
+
+    if (!succeeded) {
+        error = L"Path could not be moved to the Recycle Bin: " + path;
+    }
+    return succeeded;
 }
 
 void RefreshAfterDeletion(AppState& state) {
@@ -895,20 +958,20 @@ void DeleteSelectedRecord(AppState& state) {
 
     const auto index = static_cast<std::size_t>(selected);
     const std::wstring message =
-        L"Diesen Eintrag in den Papierkorb verschieben?\n\n" +
+        L"Move this entry to the Recycle Bin?\n\n" +
         state.records[index].filePath;
-    if (MessageBoxW(state.window, message.c_str(), L"Datei loeschen", MB_YESNO | MB_ICONWARNING) != IDYES) {
+    if (MessageBoxW(state.window, message.c_str(), L"Delete file", MB_YESNO | MB_ICONWARNING) != IDYES) {
         return;
     }
 
     std::wstring error;
     if (MovePathToRecycleBin(state.window, state.records[index].filePath, error)) {
-        AppendLog(state.log, L"Geloescht: " + state.records[index].filePath);
+        AppendLog(state.log, L"Deleted: " + state.records[index].filePath);
         state.records.erase(state.records.begin() + static_cast<std::ptrdiff_t>(index));
         RefreshAfterDeletion(state);
     } else {
-        AppendLog(state.log, L"Fehler: " + error);
-        MessageBoxW(state.window, error.c_str(), L"Loeschen fehlgeschlagen", MB_OK | MB_ICONERROR);
+        AppendLog(state.log, L"Error: " + error);
+        MessageBoxW(state.window, error.c_str(), L"Delete failed", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -922,13 +985,13 @@ void DeleteMatchingRecords(AppState& state, const std::wstring& label, Predicate
     }
 
     if (indexes.empty()) {
-        MessageBoxW(state.window, L"Keine passenden Eintraege gefunden.", label.c_str(), MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(state.window, L"No matching entries found.", label.c_str(), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
     const std::wstring message =
-        std::to_wstring(indexes.size()) +
-        L" Eintraege in den Papierkorb verschieben?\n\nVST3-Dateien werden durch diese Aktion nicht geloescht.";
+        L"Move " + std::to_wstring(indexes.size()) +
+        L" entries to the Recycle Bin?\n\nVST3 files are not deleted by this action.";
     if (MessageBoxW(state.window, message.c_str(), label.c_str(), MB_YESNO | MB_ICONWARNING) != IDYES) {
         return;
     }
@@ -938,32 +1001,32 @@ void DeleteMatchingRecords(AppState& state, const std::wstring& label, Predicate
         std::wstring error;
         const auto index = *it;
         if (MovePathToRecycleBin(state.window, state.records[index].filePath, error)) {
-            AppendLog(state.log, L"Geloescht: " + state.records[index].filePath);
+            AppendLog(state.log, L"Deleted: " + state.records[index].filePath);
             state.records.erase(state.records.begin() + static_cast<std::ptrdiff_t>(index));
             ++deleted;
         } else {
-            AppendLog(state.log, L"Fehler: " + error);
+            AppendLog(state.log, L"Error: " + error);
         }
     }
 
     RefreshAfterDeletion(state);
-    SetWindowTextW(state.status, (label + L": " + std::to_wstring(deleted) + L" Eintraege geloescht.").c_str());
+    SetWindowTextW(state.status, (label + L": " + std::to_wstring(deleted) + L" entries deleted.").c_str());
 }
 
 void DeleteVst2Duplicates(AppState& state) {
-    DeleteMatchingRecords(state, L"VST2-Dubletten loeschen", [](const PluginRecord& record) {
+    DeleteMatchingRecords(state, L"Delete VST2 duplicates", [](const PluginRecord& record) {
         return record.pluginType == PluginType::Vst2 && record.isPossibleDuplicate;
     });
 }
 
 void DeleteClapRecords(AppState& state) {
-    DeleteMatchingRecords(state, L"CLAP loeschen", [](const PluginRecord& record) {
+    DeleteMatchingRecords(state, L"Delete CLAP", [](const PluginRecord& record) {
         return record.pluginType == PluginType::Clap;
     });
 }
 
 void DeleteAaxRecords(AppState& state) {
-    DeleteMatchingRecords(state, L"AAX loeschen", [](const PluginRecord& record) {
+    DeleteMatchingRecords(state, L"Delete AAX", [](const PluginRecord& record) {
         return record.pluginType == PluginType::Aax;
     });
 }
@@ -973,32 +1036,32 @@ void StopScan(AppState& state) {
         return;
     }
     state.stopRequested.store(true);
-    SetWindowTextW(state.status, L"Stop angefordert...");
-    AppendLog(state.log, L"Stop angefordert. Der aktuelle Dateizugriff wird noch sauber beendet.");
+    SetWindowTextW(state.status, L"Stop requested...");
+    AppendLog(state.log, L"Stop requested. The current file access is finished cleanly first.");
 }
 
 void CreateMainControls(HWND window, AppState& state) {
-    CreateLabel(window, L"VST2-Pfad", 16, 18, 110, 22);
+    CreateLabel(window, L"VST2 path", 16, 18, 110, 22);
     CreateEdit(window, IDC_VST2_PATH, L"C:\\Program Files\\Vstplugins", 130, 16, 600, 24);
     CreateButton(window, IDC_BROWSE_VST2, L"Browse", 740, 15, 90, 26);
 
-    CreateLabel(window, L"VST3-Pfad", 16, 54, 110, 22);
+    CreateLabel(window, L"VST3 path", 16, 54, 110, 22);
     CreateEdit(window, IDC_VST3_PATH, L"C:\\Program Files\\Common Files\\VST3", 130, 52, 600, 24);
     CreateButton(window, IDC_BROWSE_VST3, L"Browse", 740, 51, 90, 26);
 
-    CreateLabel(window, L"CLAP-Pfad", 16, 90, 110, 22);
+    CreateLabel(window, L"CLAP path", 16, 90, 110, 22);
     CreateEdit(window, IDC_CLAP_PATH, L"C:\\Program Files\\Common Files\\CLAP", 130, 88, 600, 24);
     CreateButton(window, IDC_BROWSE_CLAP, L"Browse", 740, 87, 90, 26);
 
-    CreateLabel(window, L"AAX-Pfad", 16, 126, 110, 22);
+    CreateLabel(window, L"AAX path", 16, 126, 110, 22);
     CreateEdit(window, IDC_AAX_PATH, L"C:\\Program Files\\Common Files\\Avid\\Audio\\Plug-Ins", 130, 124, 600, 24);
     CreateButton(window, IDC_BROWSE_AAX, L"Browse", 740, 123, 90, 26);
 
-    CreateLabel(window, L"Custom-Pfad", 16, 162, 110, 22);
+    CreateLabel(window, L"Custom path", 16, 162, 110, 22);
     CreateEdit(window, IDC_CUSTOM_PATH, L"", 130, 160, 600, 24);
     CreateButton(window, IDC_BROWSE_CUSTOM, L"Browse", 740, 159, 90, 26);
 
-    CreateLabel(window, L"Ausgabeformat", 16, 200, 110, 22);
+    CreateLabel(window, L"Output format", 16, 200, 110, 22);
     state.formatCombo = CreateWindowExW(0, WC_COMBOBOXW, L"",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
                                         130, 196, 160, 120, window, ControlId(IDC_FORMAT), nullptr, nullptr);
@@ -1007,19 +1070,21 @@ void CreateMainControls(HWND window, AppState& state) {
     SendMessageW(state.formatCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"TXT"));
     SendMessageW(state.formatCombo, CB_SETCURSEL, 0, 0);
 
-    CreateLabel(window, L"Ausgabedatei", 310, 200, 100, 22);
+    CreateLabel(window, L"Output file", 310, 200, 100, 22);
     CreateEdit(window, IDC_OUTPUT_FILE, L"vst_plugin_report.html", 410, 196, 320, 24);
     state.editJsonButton = CreateButton(window, IDC_EDIT_JSON, L"Edit JSON", 640, 195, 90, 26);
     CreateButton(window, IDC_BROWSE_OUTPUT, L"Browse", 740, 195, 90, 26);
-    state.summaryLabel = CreateLabel(window, L"VST2: 0 | VST3: 0 | CLAP: 0 | AAX: 0 | Dubletten-Gruppen: 0 | Eintraege: 0 | VST2 loeschbar: 0", 16, 276, 760, 22);
+    state.summaryLabel = CreateLabel(window, L"VST2: 0 | VST3: 0 | CLAP: 0 | AAX: 0 | duplicate groups: 0 | entries: 0 | VST2 deletable: 0", 16, 276, 760, 22);
 
     state.startButton = CreateButton(window, IDC_START, L"Start Scan", 16, 236, 110, 32);
     state.stopButton = CreateButton(window, IDC_STOP, L"Stop Scan", 136, 236, 110, 32);
     state.exportButton = CreateButton(window, IDC_EXPORT, L"Export", 256, 236, 110, 32);
-    state.saveOverridesButton = CreateButton(window, IDC_SAVE_OVERRIDES, L"Overrides speichern", 376, 236, 145, 32);
-    state.cleanVst2DuplicatesButton = CreateButton(window, IDC_CLEAN_VST2_DUP, L"Del VST2 Dup", 376, 236, 120, 32);
-    state.cleanClapButton = CreateButton(window, IDC_CLEAN_CLAP, L"Del CLAP", 506, 236, 95, 32);
-    state.cleanAaxButton = CreateButton(window, IDC_CLEAN_AAX, L"Del AAX", 611, 236, 95, 32);
+    // Creation coordinates mirror LayoutControls so that the window is correct even
+    // before the first layout pass.
+    state.saveOverridesButton = CreateButton(window, IDC_SAVE_OVERRIDES, L"Save overrides", 376, 236, 145, 32);
+    state.cleanVst2DuplicatesButton = CreateButton(window, IDC_CLEAN_VST2_DUP, L"Del VST2 Dup", 531, 236, 120, 32);
+    state.cleanClapButton = CreateButton(window, IDC_CLEAN_CLAP, L"Del CLAP", 661, 236, 85, 32);
+    state.cleanAaxButton = CreateButton(window, IDC_CLEAN_AAX, L"Del AAX", 756, 236, 85, 32);
     EnableWindow(state.stopButton, FALSE);
     EnableWindow(state.exportButton, FALSE);
     EnableWindow(state.saveOverridesButton, FALSE);
@@ -1032,7 +1097,7 @@ void CreateMainControls(HWND window, AppState& state) {
                                      260, 241, 570, 22, window, ControlId(IDC_PROGRESS), nullptr, nullptr);
     SendMessageW(state.progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
 
-    state.status = CreateWindowExW(0, L"STATIC", L"Bereit.",
+    state.status = CreateWindowExW(0, L"STATIC", L"Ready.",
                                    WS_CHILD | WS_VISIBLE,
                                    16, 282, 814, 24, window, ControlId(IDC_STATUS), nullptr, nullptr);
 
@@ -1040,21 +1105,25 @@ void CreateMainControls(HWND window, AppState& state) {
                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
                                     16, 310, 814, 220, window, ControlId(IDC_RESULTS), nullptr, nullptr);
     ListView_SetExtendedListViewStyle(state.results, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-    InsertColumn(state.results, 0, L"Typ", 56);
-    InsertColumn(state.results, 1, L"Hersteller", 140);
+    InsertColumn(state.results, 0, L"Type", 56);
+    InsertColumn(state.results, 1, L"Manufacturer", 140);
     InsertColumn(state.results, 2, L"Plugin", 170);
-    InsertColumn(state.results, 3, L"Kategorie", 110);
+    InsertColumn(state.results, 3, L"Category", 110);
     InsertColumn(state.results, 4, L"Version", 90);
-    InsertColumn(state.results, 5, L"Versionsquelle", 165);
-    InsertColumn(state.results, 6, L"Groesse", 90);
-    InsertColumn(state.results, 7, L"Dublette", 80);
+    InsertColumn(state.results, 5, L"Version source", 165);
+    InsertColumn(state.results, 6, L"Size", 90);
+    InsertColumn(state.results, 7, L"Duplicate", 80);
     InsertColumn(state.results, 8, L"Status", 170);
-    InsertColumn(state.results, 9, L"Pfad", 520);
+    InsertColumn(state.results, 9, L"Path", 520);
 
     state.log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                                 16, 540, 814, 100, window, ControlId(IDC_LOG), nullptr, nullptr);
     SetWindowTextW(window, (std::wstring(L"Windows VST Plugin Scanner ") + APP_VERSION).c_str());
+    state.uiFont = CreateUiFont();
+    if (state.uiFont) {
+        EnumChildWindows(window, ApplyFontToChild, reinterpret_cast<LPARAM>(state.uiFont));
+    }
     LayoutControls(window, state);
 }
 
@@ -1153,8 +1222,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
 
             HMENU menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING, IDM_OPEN_IN_EXPLORER, L"Zielpfad im Explorer oeffnen");
-            AppendMenuW(menu, MF_STRING, IDM_DELETE_SELECTED, L"Datei/Bundle loeschen");
+            AppendMenuW(menu, MF_STRING, IDM_OPEN_IN_EXPLORER, L"Show target path in Explorer");
+            AppendMenuW(menu, MF_STRING, IDM_DELETE_SELECTED, L"Delete file/bundle");
             const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window, nullptr);
             DestroyMenu(menu);
 
@@ -1213,16 +1282,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             PopulateResultsList(state->results, state->records);
             UpdateSummaryLabel(*state);
             if (!done->fatalError.empty()) {
-                SetWindowTextW(state->status, L"Scan mit Fehler beendet.");
+                SetWindowTextW(state->status, L"Scan finished with an error.");
                 AppendLog(state->log, done->fatalError);
-                MessageBoxW(window, done->fatalError.c_str(), L"Scanfehler", MB_OK | MB_ICONERROR);
+                MessageBoxW(window, done->fatalError.c_str(), L"Scan error", MB_OK | MB_ICONERROR);
             } else if (done->stopped) {
-                SetWindowTextW(state->status, L"Scan abgebrochen. Ergebnisse koennen exportiert werden.");
-                AppendLog(state->log, L"Scan abgebrochen.");
+                SetWindowTextW(state->status, L"Scan cancelled. Results can still be exported.");
+                AppendLog(state->log, L"Scan cancelled.");
             } else {
                 SendMessageW(state->progress, PBM_SETPOS, 0, 0);
-                SetWindowTextW(state->status, L"Scan abgeschlossen. Bitte Export klicken, um einen Report zu schreiben.");
-                AppendLog(state->log, L"Scan abgeschlossen.");
+                SetWindowTextW(state->status, L"Scan complete. Click Export to write a report.");
+                AppendLog(state->log, L"Scan complete.");
             }
             EnableWindow(state->exportButton, state->records.empty() ? FALSE : TRUE);
         }
@@ -1239,16 +1308,42 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         if (state && state->running) {
             state->stopRequested.store(true);
-            MessageBoxW(window, L"Ein Scan laeuft noch. Bitte kurz warten, bis der Worker beendet ist.", L"Scan laeuft", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(window, L"A scan is still running. Please wait until the worker has finished.", L"Scan running", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
         DestroyWindow(window);
         return 0;
+    case WM_DESTROY_INLINE_EDIT: {
+        auto edit = reinterpret_cast<HWND>(lParam);
+        // Handle values can be recycled, so confirm this really is our editor
+        // before destroying anything.
+        if (state && edit && IsWindow(edit) && GetParent(edit) == state->results &&
+            GetDlgCtrlID(edit) == IDC_INLINE_EDIT) {
+            DestroyWindow(edit);
+        }
+        return 0;
+    }
     case WM_DESTROY:
         if (state) {
             state->stopRequested.store(true);
             if (state->worker.joinable()) {
                 state->worker.join();
+            }
+            // The worker allocates every notification on the heap. Anything still
+            // queued after the join would never be dispatched, so free it here.
+            MSG pending{};
+            while (PeekMessageW(&pending, window, WM_SCAN_PROGRESS, WM_SCAN_DONE, PM_REMOVE)) {
+                if (pending.message == WM_SCAN_PROGRESS) {
+                    delete reinterpret_cast<ProgressMessage*>(pending.lParam);
+                } else if (pending.message == WM_SCAN_LOG) {
+                    delete reinterpret_cast<std::wstring*>(pending.lParam);
+                } else if (pending.message == WM_SCAN_DONE) {
+                    delete reinterpret_cast<DoneMessage*>(pending.lParam);
+                }
+            }
+            if (state->uiFont) {
+                DeleteObject(state->uiFont);
+                state->uiFont = nullptr;
             }
         }
         PostQuitMessage(0);
