@@ -2,6 +2,8 @@
 
 Native Windows application for scanning installed VST2, VST3, CLAP and AAX plugins without loading or initializing plugin binaries.
 
+![Preview of the Windows VST Plugin Scanner](https://taureon-music.de/images/taureon/dev_lab/VST3-Plugin-Scanner.png)
+
 ## Features
 
 - Win32 GUI with Start/Stop scan buttons.
