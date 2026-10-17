@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vst3PluginScannerPoc VERSION 2.5.0 LANGUAGES CXX)
+project(Vst3PluginScannerPoc VERSION 2.6.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -84,8 +84,12 @@ add_executable(Vst3ProbeGui WIN32
     gui/Vst3ProbeGui.manifest
     gui/Vst3ProbeGui.rc
     gui/src/main.cpp
+    probe/src/main.cpp
+    probe/src/Vst3FactoryReader.cpp
+    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp
 )
 target_compile_definitions(Vst3ProbeGui PRIVATE
+    VST3_EMBEDDED_PROBE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
@@ -93,14 +97,30 @@ target_compile_definitions(Vst3ProbeGui PRIVATE
 )
 target_compile_options(Vst3ProbeGui PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(Vst3ProbeGui PRIVATE inventory/include probe/include)
-target_link_libraries(Vst3ProbeGui PRIVATE Vst3InventoryCore Comctl32 Ole32 Shell32)
-add_dependencies(Vst3ProbeGui Vst3MetadataProbe)
+target_link_libraries(Vst3ProbeGui PRIVATE Vst3InventoryCore sdk_hosting Comctl32 Ole32 Shell32)
 set_target_properties(Vst3ProbeGui PROPERTIES
     OUTPUT_NAME "PluginInventoryScanner"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_custom_target(PackageRelease ALL
+    COMMAND ${CMAKE_COMMAND}
+        "-DCONFIG=$<CONFIG>"
+        "-DAPP=$<TARGET_FILE:Vst3ProbeGui>"
+        "-DVERSION=${PROJECT_VERSION}"
+        "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PackageRelease.cmake"
+    DEPENDS Vst3ProbeGui
+    COMMENT "Packaging versioned single-executable Release under dist"
+    VERBATIM
+)
+
 if(BUILD_TESTING)
+    add_test(NAME SingleExeSmoke
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/probe/tests/SingleExeSmoke.ps1"
+            -Executable "$<TARGET_FILE:Vst3ProbeGui>")
+    set_tests_properties(SingleExeSmoke PROPERTIES TIMEOUT 20)
     add_executable(Vst3ProbeTests
         probe/tests/ProbeTests.cpp
     )

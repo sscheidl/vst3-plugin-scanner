@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 
 #include "InventoryModel.h"
+#include "ProbeEntry.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,7 +25,7 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"Vst3ProbeGuiWindow";
-constexpr wchar_t kWindowTitle[] = L"Plugin Inventory Scanner 2.5.0";
+constexpr wchar_t kWindowTitle[] = L"Plugin Inventory Scanner 2.6.0";
 constexpr wchar_t kDefaultVst3Path[] = L"C:\\Program Files\\Common Files\\VST3";
 constexpr UINT kProbeDoneMessage = WM_APP + 1;
 constexpr UINT kProgressMessage = WM_APP + 3;
@@ -136,7 +138,7 @@ struct AppState {
     HWND statusLabel = nullptr;
     HFONT uiFont = nullptr;
     UINT dpi = 96;
-    ScanMode scanMode = ScanMode::SingleModule;
+    ScanMode scanMode = ScanMode::Folder;
 
     std::thread worker;
     std::atomic_bool stopRequested = false;
@@ -334,7 +336,7 @@ private:
     return result;
 }
 
-[[nodiscard]] std::filesystem::path ExecutableDirectory() {
+[[nodiscard]] std::filesystem::path ExecutablePath() {
     std::wstring path(512, L'\0');
     for (;;) {
         const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
@@ -343,10 +345,14 @@ private:
         }
         if (length < path.size() - 1U) {
             path.resize(length);
-            return std::filesystem::path(path).parent_path();
+            return std::filesystem::path(path);
         }
         path.resize(path.size() * 2U);
     }
+}
+
+[[nodiscard]] std::filesystem::path ExecutableDirectory() {
+    return ExecutablePath().parent_path();
 }
 
 struct PipeCapture {
@@ -411,12 +417,12 @@ void RequestStop(AppState& state) {
                                              const std::wstring& pluginPath,
                                              DWORD timeoutMs) {
     ProbeRunResult result;
-    const auto probePath = ExecutableDirectory() / L"Vst3MetadataProbe.exe";
+    const auto probePath = ExecutablePath();
     std::error_code probePathError;
     if (probePath.empty() || !std::filesystem::exists(probePath, probePathError) ||
         probePathError) {
         result.status = L"Probe not found";
-        result.output = L"Vst3MetadataProbe.exe must be in the same directory as the GUI.";
+        result.output = L"The scanner executable cannot be accessed for an isolated scan.";
         return result;
     }
 
@@ -465,7 +471,7 @@ void RequestStop(AppState& state) {
         return result;
     }
 
-    std::wstring commandLine = QuoteCommandLineArgument(probePath.wstring()) + L" " +
+    std::wstring commandLine = QuoteCommandLineArgument(probePath.wstring()) + L" --probe " +
                                QuoteCommandLineArgument(pluginPath);
 
     SIZE_T attributeBytes = 0;
@@ -1604,7 +1610,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 0, L"STATIC", L"VST3 module or scan folder:", WS_CHILD | WS_VISIBLE,
                 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
             state->pathEdit = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                WS_EX_CLIENTEDGE, L"EDIT", kDefaultVst3Path,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(PathEdit), nullptr, nullptr);
             state->fileButton = CreateWindowExW(
                 0, L"BUTTON", L"VST3 file", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -1802,6 +1809,15 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    int argumentCount = 0;
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    if (arguments == nullptr) return 2;
+    if (argumentCount >= 2 && std::wstring_view(arguments[1]) == L"--probe") {
+        const int result = vst3scanner::RunMetadataProbe(argumentCount - 1, arguments + 1);
+        LocalFree(arguments);
+        return result;
+    }
+    LocalFree(arguments);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX commonControls{sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&commonControls);

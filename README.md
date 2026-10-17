@@ -12,14 +12,13 @@ not used by the current scanner.
 ![Historical preview of the Windows VST Plugin Scanner](https://taureon-music.de/images/taureon/dev_lab/VST3-Plugin-Scanner.png)
 
 The Dev Lab preview above belongs to the earlier scanner; it does not document
-the current 2.5.0 interface.
+the current 2.6.0 interface.
 
-## Current state: feature-complete VST 3 inventory scanner (2.5.0)
+## Current state: feature-complete VST 3 inventory scanner (2.6.0)
 
-This branch builds an isolated x64 metadata probe and a native Win32 GUI:
+The Windows x64 application is distributed as a single executable:
 
 ```text
-Vst3MetadataProbe.exe "C:\Path\Plugin.vst3"
 PluginInventoryScanner.exe
 ```
 
@@ -28,7 +27,11 @@ The GUI scans individual modules or entire folders. Folder scans recognize
 its own probe process. The initial attempt is limited to 15 seconds; a timeout
 causes exactly one retry with a 30-second limit.
 
-Version 2.5.0 provides:
+Version 2.6.0 provides:
+
+- one portable executable that starts a separate copy of itself in internal
+  `--probe` mode for each module, preserving process isolation;
+- automatic versioned Release packaging under `dist/PluginInventoryScanner-2.6.0/`;
 
 - strict JSON protocol validation and `protocol_error` for empty output;
 - a sortable inventory table for `Audio Module Class` entries;
@@ -73,8 +76,7 @@ The probe:
 - preserves empty or unusual version strings exactly as reported.
 
 Neither the Steinberg VST 3 SDK nor the Microsoft Visual C++ Redistributable is
-required at runtime. `PluginInventoryScanner.exe` and `Vst3MetadataProbe.exe` must remain
-in the same directory.
+required at runtime. Only `PluginInventoryScanner.exe` is needed to run the app.
 
 See [GUI, inventory, and folder scanning](docs/RUDIMENTARY_GUI.md) for the GUI
 and cache details.
@@ -113,11 +115,14 @@ ctest --test-dir build -C Release --output-on-failure
 Output:
 
 ```text
-build\bin\Release\Vst3MetadataProbe.exe
-build\bin\Release\PluginInventoryScanner.exe
+dist\PluginInventoryScanner-2.6.0\PluginInventoryScanner.exe
+dist\PluginInventoryScanner-2.6.0-windows-x64.zip
 ```
 
-Both executables must remain in the same directory.
+Every Release build packages the current project version under `dist`, including
+documentation, third-party notices, and a SHA-256 checksum. The separate
+`Vst3MetadataProbe.exe` target remains available under `build` for development;
+it is not required or included in the release package.
 
 ## Process protocol
 

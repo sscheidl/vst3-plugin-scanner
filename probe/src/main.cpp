@@ -1,13 +1,13 @@
 #include "JsonProtocol.h"
 #include "Vst3FactoryReader.h"
+#include "ProbeEntry.h"
+#include <windows.h>
 
 #include "public.sdk/source/vst/utility/stringconvert.h"
 
-#include <fcntl.h>
-#include <io.h>
-
 #include <exception>
-#include <iostream>
+#include <algorithm>
+#include <limits>
 #include <string>
 
 namespace {
@@ -38,19 +38,33 @@ int ExitCode(vst3scanner::ProbeStatus status) {
     return 2;
 }
 
-void EmitResult(const vst3scanner::ProbeResult& result) {
-    std::cout << vst3scanner::SerializeProbeResult(result) << '\n';
-    if (!result.diagnostic.empty()) {
-        std::cerr << result.diagnostic << '\n';
+bool WriteOutput(DWORD stream, const std::string& text) {
+    const HANDLE handle = GetStdHandle(stream);
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto length = static_cast<DWORD>(std::min<std::size_t>(
+            text.size() - offset, (std::numeric_limits<DWORD>::max)()));
+        DWORD written = 0;
+        if (!WriteFile(handle, text.data() + offset, length, &written, nullptr) || written == 0)
+            return false;
+        offset += written;
     }
+    return true;
+}
+
+bool EmitResult(const vst3scanner::ProbeResult& result) {
+    // GUI-subsystem child processes have inherited Win32 handles but no CRT console.
+    const bool written = WriteOutput(STD_OUTPUT_HANDLE,
+                                    vst3scanner::SerializeProbeResult(result) + '\n');
+    if (!result.diagnostic.empty()) {
+        WriteOutput(STD_ERROR_HANDLE, result.diagnostic + '\n');
+    }
+    return written;
 }
 
 }  // namespace
 
-int wmain(int argumentCount, wchar_t* arguments[]) {
-    _setmode(_fileno(stdout), _O_BINARY);
-    _setmode(_fileno(stderr), _O_BINARY);
-
+int vst3scanner::RunMetadataProbe(int argumentCount, wchar_t* arguments[]) {
     vst3scanner::ProbeResult result;
     std::string modulePath;
     try {
@@ -74,6 +88,12 @@ int wmain(int argumentCount, wchar_t* arguments[]) {
         result.diagnostic = "Unhandled non-standard probe exception.";
     }
 
-    EmitResult(result);
+    if (!EmitResult(result)) return 2;
     return ExitCode(result.status);
 }
+
+#ifndef VST3_EMBEDDED_PROBE
+int wmain(int argumentCount, wchar_t* arguments[]) {
+    return vst3scanner::RunMetadataProbe(argumentCount, arguments);
+}
+#endif

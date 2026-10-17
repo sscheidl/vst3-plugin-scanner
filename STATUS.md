@@ -1,13 +1,13 @@
 # Plugin Inventory Scanner project status
 
-Date: 2026-09-25
-Version: 2.5.0
+Date: 2026-10-17
+Version: 2.6.0
 Branch: `restart/vst3-sdk-probe`
 
 ## Release status
 
 The defined VST 3 inventory scope is feature-complete and ready for final
-external code review. Version 2.5.0 is a standalone Windows x64 release; no
+external code review. Version 2.6.0 is a standalone Windows x64 release; no
 online version service or plug-in management component is planned.
 
 ## Active scanner
@@ -16,7 +16,8 @@ The active codebase is a native Windows x64 VST 3 scanner consisting of:
 
 - `PluginInventoryScanner.exe`: Win32 interface, recursive folder scan, sorting,
   and export;
-- `Vst3MetadataProbe.exe`: isolated process for exactly one VST3 module;
+- an internal `--probe` mode that starts the same executable as a separate
+  process for exactly one VST3 module;
 - the official Steinberg VST 3 SDK as a pinned Git submodule;
 - a strictly validated JSON protocol between the GUI and the probe.
 
@@ -69,7 +70,7 @@ The previous passive C++ scanner is preserved under the
 `cpp-v1.1.0-pre-restart` tag. Its heuristics and old project files are not part
 of the active branch.
 
-## Real-world reference tests for 2.5.0
+## Historical real-world reference tests
 
 - WaveShell 17.1: four audio classes with four reported version values;
 - WaveShell 12.7, 16.0, and 16.7: factory loads but exports zero classes;
@@ -81,7 +82,11 @@ of the active branch.
 ## Final validation
 
 - Release x64 build completes with zero compiler errors.
-- `Vst3ProbeTests` and `Vst3InventoryTests` pass.
+- `Vst3ProbeTests`, `Vst3InventoryTests`, and `SingleExeSmoke` pass.
+- The single-executable test copies only the application to a new directory
+  with spaces and verifies structured error output from its internal probe.
+- A real ADPTR MetricAB probe using the packaged 2.6.0 executable reports Plugin
+  Alliance and version 1.5.0 successfully.
 - A practical GUI smoke test scanned 65 real modules before a controlled stop,
   retained the completed rows, sorted the table, and exported matching HTML,
   CSV, and JSON inventories.
@@ -96,5 +101,6 @@ of the active branch.
 - Third-party modules can be slow, hang, crash, or export no audio classes. The
   scanner contains these failures in a child process and reports them, but it
   cannot repair the plug-in.
-- The release is Windows x64 only and requires both executables to remain in the
-  same directory.
+- The release is Windows x64 only. One executable contains the GUI and the
+  isolated probe entry point. Release builds automatically create a versioned
+  directory and ZIP under `dist`.

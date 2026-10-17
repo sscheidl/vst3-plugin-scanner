@@ -3,13 +3,15 @@
 ## Purpose
 
 `PluginInventoryScanner.exe` scans individual VST 3 modules or entire folders without a
-command line. Third-party plug-in code is still loaded only by the separate
-`Vst3MetadataProbe.exe` process.
+command line. Third-party plug-in code is loaded only by a separate copy of the
+same executable running in internal `--probe` mode. No companion executable is
+required.
 
 ## Usage
 
 1. Start `PluginInventoryScanner.exe`.
-2. Select `VST3 file` or `Scan folder`. Folder scans recognize bundle directories
+2. The path field starts with `C:\Program Files\Common Files\VST3`. Use it directly,
+   or select `VST3 file` or `Scan folder`. Folder scans recognize bundle directories
    automatically.
 3. Click `Scan`. If the path field is empty, the scanner uses the standard
    Windows VST3 directory `C:\Program Files\Common Files\VST3`.
@@ -80,8 +82,8 @@ file at the end. An invalid schema or payload causes the entire cache to be igno
 3. No third attempt.
 
 Each attempt runs in its own Windows Job Object. Stop, window close, and timeout
-terminate the entire probe process tree. The GUI links no plug-in-hosting code
-and remains responsive during a scan. If termination fails, the scanner waits no
+terminate the entire probe process tree. The GUI process never calls the linked
+plug-in-hosting code and remains responsive during a scan. If termination fails, the scanner waits no
 more than five additional seconds and then produces a visible issue row instead
 of waiting indefinitely for pipe-reader threads.
 
