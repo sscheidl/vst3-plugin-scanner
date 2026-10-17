@@ -9,6 +9,11 @@ The previous passive C++ scanner remains available unchanged under the
 `cpp-v1.1.0-pre-restart` tag. Its heuristics and Windows file-version data are
 not used by the current scanner.
 
+![Historical preview of the Windows VST Plugin Scanner](https://taureon-music.de/images/taureon/dev_lab/VST3-Plugin-Scanner.png)
+
+The Dev Lab preview above belongs to the earlier scanner; it does not document
+the current 2.5.0 interface.
+
 ## Current state: feature-complete VST 3 inventory scanner (2.5.0)
 
 This branch builds an isolated x64 metadata probe and a native Win32 GUI:
@@ -68,7 +73,7 @@ The probe:
 - preserves empty or unusual version strings exactly as reported.
 
 Neither the Steinberg VST 3 SDK nor the Microsoft Visual C++ Redistributable is
-required at runtime. `Vst3ProbeGui.exe` and `Vst3MetadataProbe.exe` must remain
+required at runtime. `PluginInventoryScanner.exe` and `Vst3MetadataProbe.exe` must remain
 in the same directory.
 
 See [GUI, inventory, and folder scanning](docs/RUDIMENTARY_GUI.md) for the GUI
