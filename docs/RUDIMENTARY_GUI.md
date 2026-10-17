@@ -2,21 +2,24 @@
 
 ## Purpose
 
-`Vst3ProbeGui.exe` scans individual VST3 modules or entire folders without a
+`PluginInventoryScanner.exe` scans individual VST 3 modules or entire folders without a
 command line. Third-party plug-in code is still loaded only by the separate
 `Vst3MetadataProbe.exe` process.
 
 ## Usage
 
-1. Start `Vst3ProbeGui.exe`.
+1. Start `PluginInventoryScanner.exe`.
 2. Select `VST3 file` or `Scan folder`. Folder scans recognize bundle directories
    automatically.
-3. Click `Scan`.
+3. Click `Scan`. If the path field is empty, the scanner uses the standard
+   Windows VST3 directory `C:\Program Files\Common Files\VST3`.
 4. Sort the inventory by clicking a column header.
-5. Use `Export CSV` or `Export JSON` when needed.
+5. Use `Export CSV`, `Export JSON`, or `Export HTML` when needed.
 
 CSV uses a UTF-8 BOM and semicolon separators for direct spreadsheet import.
 Formula-like values from untrusted plug-in metadata are prefixed safely.
+HTML is a standalone UTF-8 report with a scan summary, local text filter, and
+sortable columns. It contains no external scripts, fonts, or network requests.
 
 ## Inventory model
 
@@ -94,6 +97,8 @@ of waiting indefinitely for pipe-reader threads.
   rejected as protocol errors.
 - Duplicate audio CIDs in a `partial` module are reduced to one inventory row;
   they are protocol errors in an `ok` response.
-- CSV and JSON preserve the raw version value.
+- CSV, JSON, and HTML preserve the raw version value.
+- HTML escapes plug-in metadata and issue diagnostics before inserting them into
+  the document.
 - A real `bitcrust.vst3` run creates the cache on the first pass; the second pass
   reports a cache hit and does not start another probe.

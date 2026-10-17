@@ -200,6 +200,7 @@ void TestExports() {
     vst3scanner::MarkCidDuplicates(parsed.audioPlugins);
     const auto csv = vst3scanner::SerializeInventoryCsv(parsed.audioPlugins, {});
     const auto json = vst3scanner::SerializeInventoryJson(parsed.audioPlugins, {});
+    const auto html = vst3scanner::SerializeInventoryHtml(parsed.audioPlugins, {});
     Check(csv.find("Plugin;Vendor;Version;Version source;SDK version;Category;Module;Module path;") == 0,
           "CSV columns must match the visible inventory order");
     Check(csv.find("Compressor;Factory Vendor;2.4.1;VST3 factory;VST 3.8.0") !=
@@ -215,6 +216,15 @@ void TestExports() {
           "JSON must contain probe duration");
     Check(json.find("\"diagnostic\":\"\"") != std::string::npos,
           "JSON must preserve per-plugin diagnostics");
+    Check(html.find("<!doctype html>") == 0 &&
+              html.find("Plugin Inventory") != std::string::npos,
+          "HTML export must be a standalone inventory document");
+    Check(html.find("Compressor") != std::string::npos &&
+              html.find("Factory Vendor") != std::string::npos,
+          "HTML export must contain inventory values");
+    Check(html.find("id=\"filter\"") != std::string::npos &&
+              html.find("data-type=\"number\"") != std::string::npos,
+          "HTML export must provide local filtering and sortable numeric columns");
 }
 
 void TestCsvFormulaInjectionGuard() {
@@ -236,6 +246,36 @@ void TestCsvFormulaInjectionGuard() {
           "CSV must neutralize formula-like version values");
     Check(csv.find("\"'@SUM(1,1)\"") != std::string::npos,
           "CSV must neutralize formula-like SDK values");
+}
+
+void TestHtmlEscaping() {
+    vst3scanner::InventoryRecord record;
+    record.cid = "00112233445566778899AABBCCDDEEFF";
+    record.name = "<script>alert('plugin')</script>";
+    record.vendor = "A&B Audio";
+    record.version = "1.0\"beta";
+    record.versionMissing = false;
+    record.modulePath = "C:\\VST3\\<unsafe>.vst3";
+    record.protocolStatus = "ok";
+    record.diagnostic = "Use > 0";
+
+    vst3scanner::ScanIssue issue;
+    issue.modulePath = "C:\\VST3\\broken&module.vst3";
+    issue.status = "load_error";
+    issue.diagnostic = "<failed>";
+
+    const auto html = vst3scanner::SerializeInventoryHtml({record}, {issue});
+    Check(html.find("<script>alert('plugin')</script>") == std::string::npos,
+          "HTML must not embed untrusted plug-in names as markup");
+    Check(html.find("&lt;script&gt;alert(&#39;plugin&#39;)&lt;/script&gt;") !=
+              std::string::npos,
+          "HTML must escape plug-in metadata");
+    Check(html.find("A&amp;B Audio") != std::string::npos &&
+              html.find("&lt;failed&gt;") != std::string::npos,
+          "HTML must escape vendor and issue fields");
+    Check(html.find("<strong>1</strong><span>Plugins</span>") != std::string::npos &&
+              html.find("<strong>1</strong><span>Issues</span>") != std::string::npos,
+          "HTML summary must count plug-ins and issues");
 }
 
 void TestWaveShellExpansion() {
@@ -314,9 +354,10 @@ int main() {
     TestCidDuplicateDetection();
     TestExports();
     TestCsvFormulaInjectionGuard();
+    TestHtmlEscaping();
     TestWaveShellExpansion();
     TestDuplicateFactoryClassHandling();
     TestProbeCacheFormat();
-    if (failures == 0) std::cout << "All VST3 inventory tests passed.\n";
+    if (failures == 0) std::cout << "All plug-in inventory tests passed.\n";
     return failures == 0 ? 0 : 1;
 }

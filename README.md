@@ -1,20 +1,21 @@
-# VST3 Plugin Scanner for Windows
+# Plugin Inventory Scanner for Windows
 
-Technical proof of concept for a reliable native VST3 inventory scanner. The
-current implementation uses the official Steinberg VST3 SDK and treats a VST3
+Plugin Inventory Scanner is a native Windows utility that scans installed VST 3
+plug-in directories and creates a structured inventory of the available
+plug-ins. The scanner uses the official Steinberg VST 3 SDK and treats a VST 3
 module as a container for zero, one, or multiple exported factory classes.
 
 The previous passive C++ scanner remains available unchanged under the
 `cpp-v1.1.0-pre-restart` tag. Its heuristics and Windows file-version data are
 not used by the current scanner.
 
-## Current state: validated VST3 inventory (2.4.0)
+## Current state: feature-complete VST 3 inventory scanner (2.5.0)
 
 This branch builds an isolated x64 metadata probe and a native Win32 GUI:
 
 ```text
 Vst3MetadataProbe.exe "C:\Path\Plugin.vst3"
-Vst3ProbeGui.exe
+PluginInventoryScanner.exe
 ```
 
 The GUI scans individual modules or entire folders. Folder scans recognize
@@ -22,7 +23,7 @@ The GUI scans individual modules or entire folders. Folder scans recognize
 its own probe process. The initial attempt is limited to 15 seconds; a timeout
 causes exactly one retry with a 30-second limit.
 
-Version 2.4.0 provides:
+Version 2.5.0 provides:
 
 - strict JSON protocol validation and `protocol_error` for empty output;
 - a sortable inventory table for `Audio Module Class` entries;
@@ -33,7 +34,7 @@ Version 2.4.0 provides:
 - statically linked MSVC runtimes for portable release binaries;
 - matching GUI and CSV columns, with UTF-8 BOM and semicolon separators;
 - CSV formula-injection protection for untrusted plug-in metadata;
-- structured JSON export;
+- structured JSON export and a standalone sortable/filterable HTML report;
 - expansion of multi-plug-in modules such as WaveShells into one row per audio
   class;
 - an explicit version source: `VST3 factory` or `Not reported`;
@@ -51,8 +52,8 @@ Controller, compatibility, and ARA helper classes are not counted as plug-ins.
 An empty class vendor may only be replaced by the vendor from the same VST3
 factory. Version strings are never changed heuristically. `VST3 factory` means
 that the displayed raw value came directly from `IPluginFactory3` or
-`IPluginFactory2`; it does not indicate whether a newer version is available
-from the vendor.
+`IPluginFactory2`. The product intentionally does not perform online version
+checks, website scraping, downloading, updating, or plug-in management.
 
 The probe:
 
@@ -66,7 +67,7 @@ The probe:
 - writes human-readable diagnostics only to `stderr`;
 - preserves empty or unusual version strings exactly as reported.
 
-Neither the Steinberg VST3 SDK nor the Microsoft Visual C++ Redistributable is
+Neither the Steinberg VST 3 SDK nor the Microsoft Visual C++ Redistributable is
 required at runtime. `Vst3ProbeGui.exe` and `Vst3MetadataProbe.exe` must remain
 in the same directory.
 
@@ -108,7 +109,7 @@ Output:
 
 ```text
 build\bin\Release\Vst3MetadataProbe.exe
-build\bin\Release\Vst3ProbeGui.exe
+build\bin\Release\PluginInventoryScanner.exe
 ```
 
 Both executables must remain in the same directory.
@@ -151,7 +152,13 @@ fields include `version` and `sdkVersion`; internally they are named
 See [Phase 1: Vst3MetadataProbe](docs/PHASE_1_PROBE.md) for the complete field
 and status reference.
 
-## License
+## Trademark and third-party notices
+
+VST is a trademark of Steinberg Media Technologies GmbH. Plugin Inventory
+Scanner is not affiliated with or endorsed by Steinberg Media Technologies
+GmbH.
 
 The SDK sources remain in the official Steinberg submodule and are governed by
-its license files. The scanner does not copy or modify plug-in files.
+their license files. Redistributed third-party notices are collected in
+[`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt). The scanner does not copy
+or modify plug-in files.

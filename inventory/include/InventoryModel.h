@@ -66,5 +66,8 @@ void MarkCidDuplicates(std::vector<InventoryRecord>& records);
 [[nodiscard]] std::string SerializeInventoryJson(
     const std::vector<InventoryRecord>& records,
     const std::vector<ScanIssue>& issues);
+[[nodiscard]] std::string SerializeInventoryHtml(
+    const std::vector<InventoryRecord>& records,
+    const std::vector<ScanIssue>& issues);
 
 }  // namespace vst3scanner

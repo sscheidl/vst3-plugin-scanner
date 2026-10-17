@@ -138,6 +138,22 @@ constexpr rapidjson::SizeType kMaximumProtocolClasses = 100000U;
     return result;
 }
 
+[[nodiscard]] std::string HtmlEscape(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (const char character : value) {
+        switch (character) {
+            case '&': result.append("&amp;"); break;
+            case '<': result.append("&lt;"); break;
+            case '>': result.append("&gt;"); break;
+            case '"': result.append("&quot;"); break;
+            case '\'': result.append("&#39;"); break;
+            default: result.push_back(character); break;
+        }
+    }
+    return result;
+}
+
 void WriteJsonString(std::ostringstream& output, std::string_view value) {
     output << '\"' << JsonEscape(value) << '\"';
 }
@@ -475,6 +491,132 @@ std::string SerializeInventoryJson(const std::vector<InventoryRecord>& records,
                << ",\"timedOut\":" << (issue.timedOut ? "true" : "false") << '}';
     }
     output << "]}";
+    return output.str();
+}
+
+std::string SerializeInventoryHtml(const std::vector<InventoryRecord>& records,
+                                   const std::vector<ScanIssue>& issues) {
+    const auto duplicateCount = static_cast<std::size_t>(std::count_if(
+        records.begin(), records.end(), [](const auto& record) { return record.duplicate; }));
+    const auto missingVersionCount = static_cast<std::size_t>(std::count_if(
+        records.begin(), records.end(), [](const auto& record) { return record.versionMissing; }));
+
+    std::ostringstream output;
+    output << R"HTML(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plugin Inventory</title>
+<style>
+:root{--ink:#17211b;--muted:#637067;--paper:#f5f3ec;--panel:#fffdf7;--line:#d7d5cb;--accent:#12664f;--accent-soft:#dcece5;--warn:#a04b22;--warn-soft:#f8e4d8;--shadow:0 18px 45px rgba(30,43,35,.10)}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#e9eee8 0,#f5f3ec 48%,#ece8dc 100%);color:var(--ink);font:14px/1.45 "Segoe UI",Tahoma,sans-serif}
+main{max-width:1680px;margin:0 auto;padding:32px}header{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:20px}
+h1{margin:0;font:700 30px/1.1 Georgia,serif;letter-spacing:-.02em}.subtitle{margin:7px 0 0;color:var(--muted)}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(105px,1fr));gap:10px;margin-bottom:18px}.metric{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow)}
+.metric strong{display:block;font-size:22px}.metric span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.toolbar{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;padding:12px}
+label{font-weight:600}input{min-width:280px;flex:1;max-width:560px;border:1px solid #aeb8b0;border-radius:6px;padding:8px 10px;background:white;color:var(--ink)}
+.count{margin-left:auto;color:var(--muted)}.table-wrap{overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:0 0 10px 10px;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#263b30;color:white;cursor:pointer;user-select:none;font-size:12px;letter-spacing:.03em}th:hover{background:#31503f}
+tbody tr:hover{background:#f0f5f1}.duplicate{background:var(--accent-soft)}.problem{background:var(--warn-soft);color:#632e17}.path,.diagnostic{white-space:normal;min-width:280px;word-break:break-word}.empty{color:var(--muted);font-style:italic}
+footer{margin-top:14px;color:var(--muted);font-size:12px}@media(max-width:760px){main{padding:16px}.summary{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}input{min-width:0;width:100%}}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>Plugin Inventory</h1><p class="subtitle">VST 3 factory metadata collected by Plugin Inventory Scanner</p></div></header>
+<section class="summary" aria-label="Inventory summary">
+)HTML";
+    output << "<div class=\"metric\"><strong>" << records.size()
+           << "</strong><span>Plugins</span></div>";
+    output << "<div class=\"metric\"><strong>" << issues.size()
+           << "</strong><span>Issues</span></div>";
+    output << "<div class=\"metric\"><strong>" << duplicateCount
+           << "</strong><span>Duplicate rows</span></div>";
+    output << "<div class=\"metric\"><strong>" << missingVersionCount
+           << "</strong><span>Versions not reported</span></div>";
+    output << R"HTML(</section>
+<div class="toolbar"><label for="filter">Filter</label><input id="filter" type="search" placeholder="Plugin, vendor, version, category, path or status"><span class="count" id="visible-count"></span></div>
+<div class="table-wrap"><table id="inventory"><thead><tr>
+<th>Plugin</th><th>Vendor</th><th>Version</th><th>Version source</th><th>SDK version</th><th>Category</th><th>Module</th><th>Module path</th><th>Duplicate</th><th>Cache</th><th>Status</th><th data-type="number">Duration (ms)</th><th>Diagnostic</th>
+</tr></thead><tbody>
+)HTML";
+
+    for (const auto& record : records) {
+        output << "<tr" << (record.duplicate ? " class=\"duplicate\"" : "") << "><td>"
+               << HtmlEscape(record.name) << "</td><td>" << HtmlEscape(record.vendor)
+               << "</td><td>";
+        if (record.versionMissing) {
+            output << "<span class=\"empty\">Not reported</span>";
+        } else {
+            output << HtmlEscape(record.version);
+        }
+        output << "</td><td>" << (record.versionMissing ? "Not reported" : "VST3 factory")
+               << "</td><td>" << HtmlEscape(record.sdkVersion) << "</td><td>"
+               << HtmlEscape(Join(record.subCategories, '|')) << "</td><td>"
+               << HtmlEscape(FileNameFromPath(record.modulePath))
+               << "</td><td class=\"path\">" << HtmlEscape(record.modulePath) << "</td><td>"
+               << (record.duplicate ? "Yes (" + std::to_string(record.duplicateCount) + ')' : "No")
+               << "</td><td>" << (record.fromCache ? "Yes" : "No") << "</td><td>"
+               << HtmlEscape(record.protocolStatus) << "</td><td data-sort=\""
+               << record.probeDurationMs << "\">" << record.probeDurationMs
+               << "</td><td class=\"diagnostic\">" << HtmlEscape(record.diagnostic)
+               << "</td></tr>\n";
+    }
+    for (const auto& issue : issues) {
+        const auto module = FileNameFromPath(issue.modulePath);
+        output << "<tr class=\"problem\"><td>[Problem] " << HtmlEscape(module)
+               << "</td><td></td><td></td><td></td><td></td><td></td><td>"
+               << HtmlEscape(module) << "</td><td class=\"path\">" << HtmlEscape(issue.modulePath)
+               << "</td><td>No</td><td>No</td><td>" << HtmlEscape(issue.status)
+               << "</td><td data-sort=\"\"></td><td class=\"diagnostic\">"
+               << HtmlEscape(issue.diagnostic) << "</td></tr>\n";
+    }
+
+    output << R"HTML(</tbody></table></div>
+<footer>Generated locally. Version values are reported by the VST 3 factory and are not compared with vendor websites.<br>VST is a trademark of Steinberg Media Technologies GmbH. Plugin Inventory Scanner is not affiliated with or endorsed by Steinberg Media Technologies GmbH.</footer>
+</main>
+<script>
+(() => {
+  const table = document.querySelector('#inventory');
+  const body = table.tBodies[0];
+  const filter = document.querySelector('#filter');
+  const count = document.querySelector('#visible-count');
+  let sortColumn = -1;
+  let ascending = true;
+  const updateCount = () => {
+    const rows = [...body.rows];
+    const visible = rows.filter(row => !row.hidden).length;
+    count.textContent = `${visible} of ${rows.length} rows`;
+  };
+  filter.addEventListener('input', () => {
+    const query = filter.value.trim().toLocaleLowerCase();
+    for (const row of body.rows) row.hidden = query !== '' && !row.textContent.toLocaleLowerCase().includes(query);
+    updateCount();
+  });
+  table.tHead.addEventListener('click', event => {
+    const header = event.target.closest('th');
+    if (!header) return;
+    const column = header.cellIndex;
+    ascending = sortColumn === column ? !ascending : true;
+    sortColumn = column;
+    const numeric = header.dataset.type === 'number';
+    const rows = [...body.rows];
+    rows.sort((left, right) => {
+      const a = left.cells[column].dataset.sort ?? left.cells[column].textContent.trim();
+      const b = right.cells[column].dataset.sort ?? right.cells[column].textContent.trim();
+      const comparison = numeric ? ((Number(a) || 0) - (Number(b) || 0)) : a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'});
+      return ascending ? comparison : -comparison;
+    });
+    for (const row of rows) body.appendChild(row);
+  });
+  updateCount();
+})();
+</script>
+</body>
+</html>
+)HTML";
     return output.str();
 }
 

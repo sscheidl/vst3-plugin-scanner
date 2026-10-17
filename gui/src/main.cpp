@@ -23,7 +23,8 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"Vst3ProbeGuiWindow";
-constexpr wchar_t kWindowTitle[] = L"VST3 Plugin Scanner 2.4.0";
+constexpr wchar_t kWindowTitle[] = L"Plugin Inventory Scanner 2.5.0";
+constexpr wchar_t kDefaultVst3Path[] = L"C:\\Program Files\\Common Files\\VST3";
 constexpr UINT kProbeDoneMessage = WM_APP + 1;
 constexpr UINT kProgressMessage = WM_APP + 3;
 constexpr DWORD kInitialProbeTimeoutMs = 15'000;
@@ -42,12 +43,19 @@ enum ControlId : int {
     ScanFolderButton = 1008,
     ExportCsvButton,
     ExportJsonButton,
+    ExportHtmlButton,
     CacheCheckbox,
 };
 
 enum class ScanMode {
     SingleModule,
     Folder,
+};
+
+enum class ExportFormat {
+    Csv,
+    Json,
+    Html,
 };
 
 class UniqueHandle {
@@ -124,6 +132,7 @@ struct AppState {
     HWND resultList = nullptr;
     HWND exportCsvButton = nullptr;
     HWND exportJsonButton = nullptr;
+    HWND exportHtmlButton = nullptr;
     HWND statusLabel = nullptr;
     HFONT uiFont = nullptr;
     UINT dpi = 96;
@@ -1167,23 +1176,39 @@ void HashValue(std::uint64_t& hash, const Value& value) {
 }
 
 [[nodiscard]] bool SelectExportPath(HWND owner,
-                                    bool json,
+                                    ExportFormat format,
                                     std::filesystem::path& selectedPath) {
     IFileSaveDialog* dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&dialog)))) {
         return false;
     }
+    const wchar_t* description = L"CSV files (*.csv)";
+    const wchar_t* pattern = L"*.csv";
+    const wchar_t* extension = L"csv";
+    const wchar_t* filename = L"vst3_inventory.csv";
+    const wchar_t* title = L"Export plug-in inventory as CSV";
+    if (format == ExportFormat::Json) {
+        description = L"JSON files (*.json)";
+        pattern = L"*.json";
+        extension = L"json";
+        filename = L"vst3_inventory.json";
+        title = L"Export plug-in inventory as JSON";
+    } else if (format == ExportFormat::Html) {
+        description = L"HTML files (*.html)";
+        pattern = L"*.html";
+        extension = L"html";
+        filename = L"vst3_inventory.html";
+        title = L"Export plug-in inventory as HTML";
+    }
     const COMDLG_FILTERSPEC filters[] = {
-        {json ? L"JSON files (*.json)" : L"CSV files (*.csv)",
-         json ? L"*.json" : L"*.csv"},
+        {description, pattern},
         {L"All files", L"*.*"},
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
-    dialog->SetDefaultExtension(json ? L"json" : L"csv");
-    dialog->SetFileName(json ? L"vst3_inventory.json" : L"vst3_inventory.csv");
-    dialog->SetTitle(json ? L"Export VST3 inventory as JSON"
-                          : L"Export VST3 inventory as CSV");
+    dialog->SetDefaultExtension(extension);
+    dialog->SetFileName(filename);
+    dialog->SetTitle(title);
 
     bool selected = false;
     if (SUCCEEDED(dialog->Show(owner))) {
@@ -1310,22 +1335,32 @@ void SortInventory(AppState& state, int column) {
     PopulateResultsList(state);
 }
 
-void ExportInventory(HWND window, const AppState& state, bool json) {
+void ExportInventory(HWND window, const AppState& state, ExportFormat format) {
     if (state.displayedInventory.empty() && state.displayedIssues.empty()) return;
     std::filesystem::path path;
-    if (!SelectExportPath(window, json, path)) return;
-    const auto content = json
-                             ? vst3scanner::SerializeInventoryJson(state.displayedInventory,
-                                                                  state.displayedIssues)
-                             : vst3scanner::SerializeInventoryCsv(state.displayedInventory,
-                                                                 state.displayedIssues);
+    if (!SelectExportPath(window, format, path)) return;
+    std::string content;
+    switch (format) {
+        case ExportFormat::Csv:
+            content = vst3scanner::SerializeInventoryCsv(state.displayedInventory,
+                                                         state.displayedIssues);
+            break;
+        case ExportFormat::Json:
+            content = vst3scanner::SerializeInventoryJson(state.displayedInventory,
+                                                          state.displayedIssues);
+            break;
+        case ExportFormat::Html:
+            content = vst3scanner::SerializeInventoryHtml(state.displayedInventory,
+                                                          state.displayedIssues);
+            break;
+    }
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
         MessageBoxW(window, L"The export file could not be opened.", kWindowTitle,
                     MB_OK | MB_ICONERROR);
         return;
     }
-    if (!json) {
+    if (format == ExportFormat::Csv) {
         static constexpr unsigned char bom[] = {0xEF, 0xBB, 0xBF};
         output.write(reinterpret_cast<const char*>(bom), sizeof(bom));
     }
@@ -1349,6 +1384,7 @@ void SetRunning(AppState& state, bool running) {
     const bool hasResults = !state.displayedInventory.empty() || !state.displayedIssues.empty();
     EnableWindow(state.exportCsvButton, !running && hasResults);
     EnableWindow(state.exportJsonButton, !running && hasResults);
+    EnableWindow(state.exportHtmlButton, !running && hasResults);
 }
 
 void UpdateFonts(HWND window, AppState& state) {
@@ -1409,14 +1445,16 @@ void LayoutControls(HWND window, AppState& state) {
     const int cacheWidth = Scale(state, 130);
     const int exportWidth = Scale(state, 104);
     MoveWindow(state.outputLabel, margin, outputLabelTop,
-               width - margin * 2 - cacheWidth - exportWidth * 2 - gap * 3,
+               width - margin * 2 - cacheWidth - exportWidth * 3 - gap * 4,
                rowHeight, TRUE);
     MoveWindow(state.cacheCheckbox,
-               width - margin - exportWidth * 2 - gap * 2 - cacheWidth,
+               width - margin - exportWidth * 3 - gap * 3 - cacheWidth,
                outputLabelTop, cacheWidth, rowHeight, TRUE);
-    MoveWindow(state.exportCsvButton, width - margin - exportWidth * 2 - gap,
+    MoveWindow(state.exportCsvButton, width - margin - exportWidth * 3 - gap * 2,
                outputLabelTop, exportWidth, rowHeight, TRUE);
-    MoveWindow(state.exportJsonButton, width - margin - exportWidth,
+    MoveWindow(state.exportJsonButton, width - margin - exportWidth * 2 - gap,
+               outputLabelTop, exportWidth, rowHeight, TRUE);
+    MoveWindow(state.exportHtmlButton, width - margin - exportWidth,
                outputLabelTop, exportWidth, rowHeight, TRUE);
     const int outputTop = outputLabelTop + rowHeight + Scale(state, 4);
     const int statusHeight = Scale(state, 24);
@@ -1427,11 +1465,13 @@ void LayoutControls(HWND window, AppState& state) {
 }
 
 void StartProbe(HWND window, AppState& state) {
-    const auto selectedPath = ReadWindowText(state.pathEdit);
+    auto selectedPath = ReadWindowText(state.pathEdit);
+    auto mode = state.scanMode;
     if (selectedPath.empty()) {
-        MessageBoxW(window, L"Select a VST3 module or scan folder first.",
-                    kWindowTitle, MB_OK | MB_ICONINFORMATION);
-        return;
+        selectedPath = kDefaultVst3Path;
+        mode = ScanMode::Folder;
+        state.scanMode = mode;
+        SetWindowTextW(state.pathEdit, selectedPath.c_str());
     }
 
     std::error_code error;
@@ -1442,7 +1482,6 @@ void StartProbe(HWND window, AppState& state) {
         return;
     }
     const bool isDirectory = std::filesystem::is_directory(path, error) && !error;
-    const auto mode = state.scanMode;
     const bool useCache = SendMessageW(state.cacheCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (mode == ScanMode::Folder && !isDirectory) {
         MessageBoxW(window, L"Select a directory for a folder scan.",
@@ -1580,7 +1619,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(StopButton), nullptr, nullptr);
             state->outputLabel = CreateWindowExW(
-                0, L"STATIC", L"VST3 inventory (click a column header to sort):",
+                0, L"STATIC", L"Plug-in inventory (click a column header to sort):",
                 WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
             state->cacheCheckbox = CreateWindowExW(
                 0, L"BUTTON", L"Enable cache",
@@ -1593,6 +1632,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             state->exportJsonButton = CreateWindowExW(
                 0, L"BUTTON", L"Export JSON", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ExportJsonButton), nullptr, nullptr);
+            state->exportHtmlButton = CreateWindowExW(
+                0, L"BUTTON", L"Export HTML", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, 0, 0, 0, window, reinterpret_cast<HMENU>(ExportHtmlButton), nullptr, nullptr);
             state->resultList = CreateWindowExW(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
@@ -1605,6 +1647,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 state->runButton == nullptr || state->stopButton == nullptr ||
                 state->outputLabel == nullptr || state->cacheCheckbox == nullptr ||
                 state->exportCsvButton == nullptr || state->exportJsonButton == nullptr ||
+                state->exportHtmlButton == nullptr ||
                 state->resultList == nullptr || state->statusLabel == nullptr) {
                 MessageBoxW(window, L"The user interface could not be created completely.",
                             kWindowTitle, MB_OK | MB_ICONERROR);
@@ -1684,10 +1727,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     StartProbe(window, *state);
                     return 0;
                 case ExportCsvButton:
-                    ExportInventory(window, *state, false);
+                    ExportInventory(window, *state, ExportFormat::Csv);
                     return 0;
                 case ExportJsonButton:
-                    ExportInventory(window, *state, true);
+                    ExportInventory(window, *state, ExportFormat::Json);
+                    return 0;
+                case ExportHtmlButton:
+                    ExportInventory(window, *state, ExportFormat::Html);
                     return 0;
                 case StopButton:
                     SetWindowTextW(state->statusLabel, L"Stopping ...");

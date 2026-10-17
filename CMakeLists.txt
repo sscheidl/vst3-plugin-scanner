@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vst3PluginScannerPoc VERSION 2.4.0 LANGUAGES CXX)
+project(Vst3PluginScannerPoc VERSION 2.5.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -96,6 +96,7 @@ target_include_directories(Vst3ProbeGui PRIVATE inventory/include probe/include)
 target_link_libraries(Vst3ProbeGui PRIVATE Vst3InventoryCore Comctl32 Ole32 Shell32)
 add_dependencies(Vst3ProbeGui Vst3MetadataProbe)
 set_target_properties(Vst3ProbeGui PROPERTIES
+    OUTPUT_NAME "PluginInventoryScanner"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
